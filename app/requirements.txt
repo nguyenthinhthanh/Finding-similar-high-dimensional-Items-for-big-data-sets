@@ -1,0 +1,8 @@
+dask[distributed]
+dask
+bokeh>=3.1.0
+fastapi
+uvicorn
+pyroaring
+pandas
+pyarrow
