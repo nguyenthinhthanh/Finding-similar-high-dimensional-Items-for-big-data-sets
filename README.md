@@ -7,7 +7,7 @@
 ## Cấu trúc thư mục
 - `docs/` — tóm tắt thuật toán, tham khảo, slides demo.
 - `docker/` — Dockerfile(s) cho service (api, worker, indexer), mẫu `docker-compose.yml`.
-- `src/` — mã nguồn Python:
+- `app/` — mã nguồn Python:
   - `indexing/` — logic xây dựng chỉ mục phân tán (sharding, partitioning).
   - `quantization/` — cài đặt Query-driven Dynamic Quantization (QED-like).
   - `query/` — pipeline query: candidate generation → local scoring → global aggregation.
