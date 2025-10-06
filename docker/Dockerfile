@@ -15,7 +15,10 @@ RUN apt-get update && apt-get install -y build-essential \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy toàn bộ mã nguồn ứng dụng vào container
-COPY app /app
+COPY app/src /app/src
+COPY benchmarks /app/benchmarks
 
-# Chạy ứng dụng FastAPI bằng Uvicorn
-CMD ["uvicorn", "query_service:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV PYTHONPATH=/app/src
+
+# default command (can be overridden in docker-compose)
+CMD ["bash"]
