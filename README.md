@@ -28,22 +28,35 @@ Phương pháp chính là thực hiện **quantization phụ thuộc vào query*
 
 ---
 
-## Cách chạy local với Docker Compose
-1. Clone repo
+## Hướng dẫn chạy Dask Cluster với Docker Compose
+### 1. Clone repo
 ```bash
 git https://github.com/nguyenthinhthanh/Finding-similar-high-dimensional-Items-for-big-data-sets
 ```
 
-2. Xây và khởi chạy toàn bộ stack
+### 2. Build images
 ```bash
 # build
 docker compose build
 
-# khởi chạy
-docker compose up -d
+# Khởi động cluster
+docker compose up -d --scale worker=3
 ```
+#### Tổng quan các service
 
-3. Kiểm tra Dask Dashboard
+| Service   | Số container | Mô tả                |
+|------------|---------------|----------------------|
+| scheduler  | 1             | Điều phối công việc  |
+| worker     | 3             | Tính toán song song  |
+| query      | 1             | API HTTP gọi tới Dask cluster |
+
+### 3. Kiểm tra log
+```bash
+docker compose logs -f scheduler
+docker compose logs -f worker
+docker compose logs -f query
+```
+### 4. Kiểm tra Dask Dashboard
 ```bash
 Mặc định, Dask Dashboard sẽ được expose tại: http://localhost:8787
 ```
