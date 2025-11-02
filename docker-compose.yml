@@ -1,6 +1,6 @@
 version: "3.8"
 services:
-  scheduler:
+  scheduler:  # docker compose up
     image: dask-scheduler-img
     build:
       context: .
@@ -35,7 +35,7 @@ services:
         limits:
           memory: 4G
 
-  query:
+  query:  # docker compose up
     image: dask-query-img
     build:
       context: .
@@ -52,17 +52,6 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/data
-
-  indexer:
-    image: dask-indexer-image
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    command: sh -c "python /app/src/index_builder.py --data ./data/raw --out /data/shards"
-    volumes:
-      - ./data:/data
-    networks:
-      - dasknet
 
 networks:
   dasknet:
