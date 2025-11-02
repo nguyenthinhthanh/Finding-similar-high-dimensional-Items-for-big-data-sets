@@ -1,12 +1,31 @@
 # src/worker_tasks.py
 import numpy as np
-import os
+import sys, os
 from typing import List, Tuple
-from src.qed import query_dependent_bins, quantify_score
+"""
+Worker-side Tasks for Dask-based Query Service
+----------------------------------------------
+This module contains functions executed on individual Dask workers.
+It handles:
+ - Listing local shard files for processing.
+ - Scanning shard data and applying query-dependent filtering.
+ - Scoring candidate points and returning top-k candidates per worker.
+
+Notes:
+ - Worker tasks return local IDs (shard index, row index) instead of global IDs.
+ - Aggregation and top-k merging is handled by the query service.
+"""
+
+# Add current directory to Python import path (so local imports work)
+sys.path.append(os.path.dirname(__file__))
+from qed import query_dependent_bins, quantify_score
 
 SHARD_DIR = os.environ.get('SHARD_DIR', '/data/shards')
 
 def list_local_shards() -> List[str]:
+    """
+    Return a sorted list of local shard file paths in SHARD_DIR.
+    """
     if not os.path.exists(SHARD_DIR):
         return []
     return sorted([os.path.join(SHARD_DIR, f) for f in os.listdir(SHARD_DIR) if f.endswith('.npy')])

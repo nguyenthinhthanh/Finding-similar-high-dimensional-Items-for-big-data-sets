@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: sh -c "uvicorn query.query_service:app --host 0.0.0.0 --port 8000"
+    command: sh -c "uvicorn app.src.query_service:app --host 0.0.0.0 --port 8000"
     environment:
       - DASK_SCHEDULER_ADDRESS=tcp://scheduler:8786
     depends_on:
