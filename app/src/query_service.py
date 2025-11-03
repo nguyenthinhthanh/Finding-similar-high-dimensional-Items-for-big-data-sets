@@ -121,7 +121,7 @@ def query(req: QueryRequest):
         5. Merge, sort, and truncate to top-k results.
     """
     # --- DEBUG: Print received JSON request ---
-    print(f"[DEBUG] Received query: {req.json()}")
+    print(f"[DEBUG] Received query: {req.json()}", flush=True)
 
     # Convert request vector to NumPy array
     q = np.asarray(req.vector, dtype=float)
@@ -132,7 +132,7 @@ def query(req: QueryRequest):
     # Submit query tasks to all active Dask workers
     workers = list(client.scheduler_info()['workers'].keys())
     # DEBUG: Output the workers for inspection
-    print(f"[DEBUG] Active Dask workers: {workers}")
+    print(f"[DEBUG] Active Dask workers: {workers}", flush=True)
 
     futures = []
     for w in workers:
