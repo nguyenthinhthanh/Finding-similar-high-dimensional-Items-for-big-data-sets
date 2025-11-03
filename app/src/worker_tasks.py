@@ -47,8 +47,10 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, top_m: int = 10
                 pass
             # Quick pass: check only small subset of dims (heuristic) – here we simply score
             s = quantify_score(pt, query, edges)
-            # Each candidate: ((shard_idx, row_idx), score)
-            candidates.append(((si, i), float(s)))
+            # Create preview (first preview_len elements)
+            preview = pt[:10].tolist()
+            # Each candidate: ((shard_idx, row_idx), score, preview)
+            candidates.append(((si, i), float(s), preview))
     # Keep top_m
     candidates.sort(key=lambda x: x[1], reverse=True)
     return candidates[:top_m]

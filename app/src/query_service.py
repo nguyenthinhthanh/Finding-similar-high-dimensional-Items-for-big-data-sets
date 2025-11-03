@@ -151,5 +151,5 @@ def query(req: QueryRequest):
     topk = merged[:req.k]
     
     # NOTE: Further steps like resolving vector IDs or exact distance
-    # computation are omitted for simplicity.
-    return {"candidates": topk}
+    # Return JSON-serializable structure already (vector_preview is a list)
+    return {"candidates": [{"id": cand[0], "score": cand[1], "vector_preview": cand[2]} for cand in topk]}
