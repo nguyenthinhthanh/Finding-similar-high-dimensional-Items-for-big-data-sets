@@ -4,10 +4,14 @@ from pydantic import BaseModel
 from distributed import Client
 import numpy as np
 import sys, os
+import time
+import logging
 from typing import List, Tuple
 
 # Add current directory to Python import path (so local imports work)
 sys.path.append(os.path.dirname(__file__))
+
+logger = logging.getLogger("query_service")
 
 # -----------------------------------------------------------
 # Dask-based Query Service
@@ -56,16 +60,48 @@ else:
     GLOBAL_EDGES = None
     raise FileNotFoundError(f"Precomputed edges file not found at {EDGES_PATH}")
 
+def wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3):
+    """
+    Wait until all expected Dask workers are connected or timeout.
+    """
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            sinfo = client.scheduler_info()
+            workers = sinfo.get("workers", {})
+            n = len(workers)
+            if n >= expected_count:
+                return workers
+        except Exception as e:
+            print(f"[Error] {e}", flush=True)
+        time.sleep(poll_interval)
+    print(f"[Error] Timeout reached: only {len(workers) if 'workers' in locals() else 0}/{expected_count} workers.", flush=True)
+    return workers if 'workers' in locals() else {}
+
+
 @app.on_event("startup")    
 def startup_event():
     """
     FastAPI lifecycle hook: called when the service starts.
     Ensures all Dask workers are reachable and have required modules loaded.
     """
-    responses = client.run(lambda: "worker ready")
-    print("[Startup] Connected workers:")
-    for addr, msg in responses.items():
-        print(f"  - {addr}: {msg}")
+    print("[Startup] Waiting for Dask workers (timeout=30s)...", flush=True)
+    workers = wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3)
+
+    if not workers:
+        print("[Startup] WARNING: No workers detected; continuing but queries may fail.", flush=True)
+    else:
+        print("[Startup] Workers detected:", list(workers.keys()), flush=True)
+
+    if workers:
+        try:
+            responses = client.run(lambda: "worker ready")
+            print("[Startup] Connected workers:", responses, flush=True)
+            for addr, msg in responses.items():
+                print(f"  - {addr}: {msg}", flush=True)
+        except Exception as e:
+            print(f"[Startup] client.run() failed during startup: {e}", flush=True)
 
 # -----------------------------------------------------------
 # POST /query endpoint
@@ -84,6 +120,8 @@ def query(req: QueryRequest):
         4. Gather partial results from all workers.
         5. Merge, sort, and truncate to top-k results.
     """
+    # --- DEBUG: Print received JSON request ---
+    print(f"[DEBUG] Received query: {req.json()}")
 
     # Convert request vector to NumPy array
     q = np.asarray(req.vector, dtype=float)
@@ -93,10 +131,14 @@ def query(req: QueryRequest):
 
     # Submit query tasks to all active Dask workers
     workers = list(client.scheduler_info()['workers'].keys())
+    # DEBUG: Output the workers for inspection
+    print(f"[DEBUG] Active Dask workers: {workers}")
+
     futures = []
     for w in workers:
         f = client.submit(lambda qq, ee: __import__('worker_tasks').shard_qed_filter_local(qq, ee, top_m=100), q, edges, workers=[w])
         futures.append(f)
+    # Each candidate: ((shard_idx, row_idx), score)
     results = client.gather(futures)
 
     # Merge candidate lists from all workers

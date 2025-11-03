@@ -27,7 +27,7 @@ def list_local_shards() -> List[str]:
     Return a sorted list of local shard file paths in SHARD_DIR.
     """
     if not os.path.exists(SHARD_DIR):
-        return []
+        raise FileNotFoundError(f"Shard directory not found: {SHARD_DIR}")
     return sorted([os.path.join(SHARD_DIR, f) for f in os.listdir(SHARD_DIR) if f.endswith('.npy')])
 
 def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, top_m: int = 100) -> List[Tuple[int, float]]:
@@ -38,14 +38,17 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, top_m: int = 10
     shards = list_local_shards()
     for si, shard_path in enumerate(shards):
         arr = np.load(shard_path)
+        # Bin index choosen (lo, hi) 
         sel_bins = query_dependent_bins(query, edges)
         for i, pt in enumerate(arr):
-            # fast filter
+            # Fast filter
             if not all(True for _ in [0]):
+                # Do nothing, need to code fast filter
                 pass
-            # quick pass: check only small subset of dims (heuristic) – here we simply score
+            # Quick pass: check only small subset of dims (heuristic) – here we simply score
             s = quantify_score(pt, query, edges)
+            # Each candidate: ((shard_idx, row_idx), score)
             candidates.append(((si, i), float(s)))
-    # keep top_m
+    # Keep top_m
     candidates.sort(key=lambda x: x[1], reverse=True)
     return candidates[:top_m]

@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   scheduler:  # docker compose up
     image: dask-scheduler-img
@@ -40,7 +39,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: sh -c "uvicorn app.src.query_service:app --host 0.0.0.0 --port 8000"
+    command: sh -c "uvicorn src.query_service:app --host 0.0.0.0 --port 8000"
     environment:
       - DASK_SCHEDULER_ADDRESS=tcp://scheduler:8786
     depends_on:
@@ -52,6 +51,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/data
+      - ./app/src:/app/src
 
 networks:
   dasknet:
