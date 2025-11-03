@@ -135,9 +135,16 @@ def query(req: QueryRequest):
     print(f"[DEBUG] Active Dask workers: {workers}", flush=True)
 
     futures = []
-    for w in workers:
-        f = client.submit(lambda qq, ee: __import__('worker_tasks').shard_qed_filter_local(qq, ee, top_m=100), q, edges, workers=[w])
+    for wi, w in enumerate(workers):
+        f = client.submit(
+            lambda qq, ee, rank, total: __import__('worker_tasks').shard_qed_filter_local(
+                qq, ee, rank, total, top_m=100
+            ),
+            q, edges, wi, len(workers),
+            workers=[w]
+        )
         futures.append(f)
+
     # Each candidate: ((shard_idx, row_idx), score)
     results = client.gather(futures)
 

@@ -2,6 +2,7 @@
 import numpy as np
 import sys, os
 from typing import List, Tuple
+from distributed import get_worker
 """
 Worker-side Tasks for Dask-based Query Service
 ----------------------------------------------
@@ -22,21 +23,40 @@ from qed import query_dependent_bins, quantify_score
 
 SHARD_DIR = os.environ.get('SHARD_DIR', '/data/shards')
 
-def list_local_shards() -> List[str]:
+def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]:
     """
-    Return a sorted list of local shard file paths in SHARD_DIR.
+    Return a list of (global_shard_index, shard_path) assigned to THIS worker.
+    Returns:
+      list of (global_index, path) for shards assigned to this worker.
     """
     if not os.path.exists(SHARD_DIR):
+        print(f"[ERROR] Shard directory not found: {SHARD_DIR}", flush=True)
         raise FileNotFoundError(f"Shard directory not found: {SHARD_DIR}")
-    return sorted([os.path.join(SHARD_DIR, f) for f in os.listdir(SHARD_DIR) if f.endswith('.npy')])
+    
+    # Stable global list of shards
+    all_files = sorted([f for f in os.listdir(SHARD_DIR) if f.endswith('.npy')])
+    all_shards = [os.path.join(SHARD_DIR, f) for f in all_files]
+    S = len(all_shards)
 
-def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, top_m: int = 100) -> List[Tuple[int, float]]:
+    # Build assigned list as (global_index, path)
+    assigned = [
+        (i, path)
+        for i, path in enumerate(all_shards)
+        if (i % n_workers) == worker_rank
+    ]
+
+    # Debug print so you can see partitioning on worker logs
+    print(f"[Worker] Worker index={worker_rank}/{n_workers}, Total shards={S}, Assigned={len(assigned)}", flush=True)
+    return assigned
+
+def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: int, n_workers: int, top_m: int = 100) -> List[Tuple[int, float]]:
     """Run on a worker; scan local shard files and return top_m candidate (id, score).
     IDs returned are local tuple (shard_idx, local_idx) to be resolved by aggregator.
     """
     candidates = []
-    shards = list_local_shards()
-    for si, shard_path in enumerate(shards):
+    # List of (global_index, path)
+    shards = list_local_shards(worker_rank, n_workers)
+    for si, shard_path in shards:
         arr = np.load(shard_path)
         # Bin index choosen (lo, hi) 
         sel_bins = query_dependent_bins(query, edges)

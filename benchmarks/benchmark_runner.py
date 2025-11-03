@@ -132,16 +132,19 @@ def run_benchmarks(data, queries, methods, k=10):
             for qi, row in enumerate(idx):
                 print(f"\nQuery {qi}:")
                 for rank, global_idx in enumerate(row):
+                    shard_idx = global_idx // 5000
+                    row_idx   = global_idx % 5000
                     vector_value = data[global_idx]
                     preview = vector_value[:10]
-                    print(f"  Top-{rank+1}: global={global_idx:6d} → preview={preview}")
-
+                    print(f"  Top-{rank+1}: global={global_idx:6d} (shard={shard_idx}, row={row_idx}) → preview={preview}")
 
     return pd.DataFrame(results)
 
 SINGLE_TEST = 0
 MERTRIC_TEST = 1
 MODE = SINGLE_TEST
+
+SHARD_SIZE = 5000
 
 # ========== Main test ==========
 if __name__ == "__main__":
