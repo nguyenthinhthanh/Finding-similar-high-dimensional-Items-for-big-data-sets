@@ -5,10 +5,8 @@ import sys, os
 import pandas as pd
 from collections import defaultdict
 from sklearn.metrics.pairwise import euclidean_distances
-from sklearn.random_projection import GaussianRandomProjection
+from app.src.minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
 
-# Add current directory to Python import path (so local imports work)
-sys.path.append(os.path.dirname(__file__))
 # from synth_data import make_synthetic
 # ------------------------------------------------------------
 # Benchmark framework for comparing similarity search methods
@@ -74,84 +72,6 @@ def faiss_search(queries, data, k=10):
     _, I = index.search(queries, k)
     return I
 
-# ========== MinHash-aware search helpers ==========
-class MinHashLSHIndex:
-    """
-    Build-once MinHash LSH index using banding.
-    - data: np.ndarray shape (N, num_perm), dtype integer-like (uint64 or int)
-    - bands: number of bands (bands * rows == num_perm)
-    - max_bucket_size: cap per bucket to avoid pathological buckets
-    """
-    def __init__(self, data: np.ndarray, bands: int = 32, max_bucket_size: int = 5000):
-        self.data = data
-        self.N, self.num_perm = data.shape
-        assert self.num_perm % bands == 0, "num_perm must be divisible by bands"
-        self.bands = bands
-        self.rows = self.num_perm // bands
-        self.max_bucket_size = max_bucket_size
-        self.tables = [defaultdict(list) for _ in range(self.bands)]
-        self._build_tables()
-
-    def _build_tables(self):
-        # Build tables once. Use tobytes() as key (fast).
-        for idx in range(self.N):
-            sig = self.data[idx]
-            for b in range(self.bands):
-                start = b * self.rows
-                key = sig[start:start+self.rows].tobytes()
-                tbl = self.tables[b]
-                if len(tbl[key]) < self.max_bucket_size:
-                    tbl[key].append(idx)
-
-    def query(self, q: np.ndarray, k: int = 10, max_candidates: int = 2000, fallback_sample: int = 200):
-        """
-        Query a single signature q (1D array): returns (ids_array, sims_array)
-        sims are estimated Jaccard = fraction of equal positions between q and candidate signature.
-        """
-        cand_set = set()
-        for b in range(self.bands):
-            start = b * self.rows
-            key = q[start:start+self.rows].tobytes()
-            bucket = self.tables[b].get(key)
-            if bucket:
-                cand_set.update(bucket)
-            if len(cand_set) >= max_candidates:
-                break
-
-        if not cand_set:
-            cand_list = np.random.choice(self.N, size=min(fallback_sample, self.N), replace=False)
-        else:
-            cand_list = np.fromiter(cand_set, dtype=int)
-
-        if cand_list.size == 0:
-            return np.array([], dtype=int), np.array([], dtype=float)
-
-        cand_sigs = self.data[cand_list]  # shape (n_cand, num_perm)
-        # vectorized equality and mean -> estimated Jaccard
-        sims = (cand_sigs == q).mean(axis=1)
-        top_idxs = np.argsort(sims)[-k:][::-1]  # indices into cand_list (descending)
-        return cand_list[top_idxs], sims[top_idxs]
-    
-
-def minhash_lsh_search_wrapper(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
-    """
-    Wrapper that calls a prebuilt MinHashLSHIndex for each query.
-    lsh_index must be built once and passed in (not None).
-    """
-    if lsh_index is None:
-        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
-    all_results = []
-    for q in queries:
-        ids, sims = lsh_index.query(q, k=k)
-        # if fewer than k, pad with random indices or leave as is (we'll return array rows of length k)
-        if len(ids) < k:
-            # fallback: pad with -1 to maintain shape, caller can handle if needed
-            pad = np.full(k - len(ids), -1, dtype=int)
-            ids = np.concatenate([ids, pad])
-        all_results.append(ids[:k])
-    return np.vstack(all_results)
-
-
 # ========== Benchmark runner ==========
 def run_benchmarks(data, queries, methods, k=10):
     print(f"Running {len(methods)} methods on data {data.shape}, queries={queries.shape[0]}...")
@@ -193,7 +113,7 @@ def run_benchmarks(data, queries, methods, k=10):
 
 SINGLE_TEST = 0
 MERTRIC_TEST = 1
-MODE = MERTRIC_TEST
+MODE = SINGLE_TEST
 
 SHARD_SIZE = 5000
 
@@ -252,6 +172,13 @@ if __name__ == "__main__":
         47379742535648623, 55053311741533782
     ], dtype=np.uint64)
 
+    # Build lsh banding
+    lsh_index = build_minhash_lsh_index(data=data)
+
+    # Wrappers for methods to match expected function signature (queries, data, k)
+    def lsh_wrapper(queries_arr, data_arr, k=10):
+        return minhash_lsh_search(queries_arr, data_arr, k=k, lsh_index=lsh_index)
+
     if MODE==SINGLE_TEST:
         print("Single Test....")
         assert query_vector.shape[0] == data.shape[1]
@@ -259,16 +186,6 @@ if __name__ == "__main__":
     else:
         print("Metrics Test....")
         queries = data[:100]
-
-    # Build MinHash LSH index once (tune bands)
-    BANDS = 32  # try 32, 16, 8 depending on recall/precision tradeoff
-    print("Building MinHash-LSH index (this runs once)...")
-    lsh_index = MinHashLSHIndex(data, bands=BANDS, max_bucket_size=5000)
-    print(f"Built MinHashLSHIndex: bands={BANDS}, rows={lsh_index.rows}")
-
-    # wrappers for methods to match expected function signature (queries, data, k)
-    def lsh_wrapper(queries_arr, data_arr, k=10):
-        return minhash_lsh_search_wrapper(queries_arr, data_arr, k=k, lsh_index=lsh_index)
 
     methods = {
         "Brute-force": brute_force_nn,
