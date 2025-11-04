@@ -25,4 +25,5 @@ def inspect_data(X):
 
 if __name__ == '__main__':
     X = make_synthetic(20000, 128, out='data/raw.npy')
+    # main branch
     # inspect_data(X)
