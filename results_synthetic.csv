@@ -1,4 +1,4 @@
 method,recall@k,precision@k,MRR,latency_ms,throughput_qps
-Brute-force,1.0,1.0,1.0,13.718,72.9
-FAISS,1.0,1.0,1.0,75.29,13.28
-LSH,0.0,0.0,0.0,36.458,27.43
+Brute-force,1.0,1.0,1.0,11.683,85.59
+FAISS,1.0,1.0,1.0,34.701,28.82
+LSH,0.2,0.2,1.0,103.137,9.7
