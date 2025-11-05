@@ -2,16 +2,23 @@
 import numpy as np
 import time
 import sys, os
+import pickle
 import pandas as pd
 from collections import defaultdict
 from sklearn.metrics.pairwise import euclidean_distances
-from app.src.minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
+from app.src.minhash_lsh import build_minhash_lsh_index, MinHashLSHIndex
+from benchmarks.synth_data import MinHash, shingle_document
 
-# from synth_data import make_synthetic
 # ------------------------------------------------------------
 # Benchmark framework for comparing similarity search methods
 # (Brute-force, FAISS, LSH, etc.) on synthetic high-dimensional data.
 # ------------------------------------------------------------
+
+# Load docs & ids
+with open("data/docs.pkl", "rb") as f:
+    docs = pickle.load(f)
+with open("data/ids.pkl", "rb") as f:
+    ids = pickle.load(f)
 
 # ========== Metrics ==========
 def recall_at_k(pred, truth, k):
@@ -60,6 +67,23 @@ def brute_force_nn(queries, data, k=10):
     idx = np.argsort(dists, axis=1)[:, :k]
     return idx
 
+def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
+    """
+    Wrapper that calls a prebuilt MinHashLSHIndex for each query.
+    lsh_index must be built once and passed in (not None).
+    """
+    if lsh_index is None:
+        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
+    all_results = []
+    for q in queries:
+        ids, sims = lsh_index.query(q, k=k)
+        # if fewer than k, pad with random indices or leave as is (we'll return array rows of length k)
+        if len(ids) < k:
+            # fallback: pad with -1 to maintain shape, caller can handle if needed
+            pad = np.full(k - len(ids), -1, dtype=int)
+            ids = np.concatenate([ids, pad])
+        all_results.append(ids[:k])
+    return np.vstack(all_results)
 
 def faiss_search(queries, data, k=10):
     """
@@ -102,12 +126,47 @@ def run_benchmarks(data, queries, methods, k=10):
         if MODE == SINGLE_TEST:
             for qi, row in enumerate(idx):
                 print(f"\nQuery {qi}:")
+
+                query_vec = queries[qi].ravel()
                 for rank, global_idx in enumerate(row):
-                    shard_idx = global_idx // 5000
-                    row_idx   = global_idx % 5000
-                    vector_value = data[global_idx]
+                    if int(global_idx) == -1:
+                        print(f"  Top-{rank+1}: <padded -1> (no result)")
+                        continue
+
+                    shard_idx = int(global_idx) // SHARD_SIZE
+                    row_idx   = int(global_idx) % SHARD_SIZE
+                    vector_value = data[int(global_idx)]
                     preview = vector_value[:10]
-                    print(f"  Top-{rank+1}: global={global_idx:6d} (shard={shard_idx}, row={row_idx}) → preview={preview}")
+
+                    doc_text = docs[int(global_idx)]
+                    doc_id = ids[int(global_idx)]
+
+                    # Euclidean distance (L2) between query and candidate
+                    # ensure cast to float for safe math if dtype is uint64
+                    try:
+                        # if signatures are integer types, convert to float for distance
+                        dist = float(np.linalg.norm(query_vec.astype(float) - vector_value.astype(float)))
+                    except Exception:
+                        # fallback: use sklearn pairwise for safety
+                        from sklearn.metrics.pairwise import euclidean_distances
+                        dist = float(euclidean_distances(query_vec.reshape(1, -1).astype(float),
+                                                        vector_value.reshape(1, -1).astype(float))[0, 0])
+
+                    # If using MinHash signatures, also report estimated Jaccard similarity:
+                    # fraction of positions in signature that are equal (MinHash property).
+                    try:
+                        jacc_est = float(np.count_nonzero(query_vec == vector_value) / query_vec.shape[0])
+                    except Exception:
+                        jacc_est = None
+
+                    print(f"  Top-{rank+1}: global={global_idx:6d} (shard={shard_idx}, row={row_idx}): preview={preview}")
+                    print(f"        preview={preview}")
+                    print(f"        doc_id={doc_id} -> {doc_text[:100]}...")
+                    print(f"        Euclidean L2 distance = {dist:.6f}", end="")
+                    if jacc_est is not None:
+                        print(f"  |  est.Jaccard(from sig) = {jacc_est:.4f}")
+                    else:
+                        print("")
 
     return pd.DataFrame(results)
 
@@ -124,53 +183,24 @@ if __name__ == "__main__":
     # data = np.load("data/raw.npy")
     data = np.load("data/sigs.npy")
 
-    # A specific 128-dimensional query vector
-    # query_vector kiểu uint64
-    query_vector = np.array([
-        20671465220331927, 34175777397496750, 80829186156850025,
-        88635534964285038, 9112867606025055, 1709117566375511,
-        82917782605133416, 35790081631704231, 69571680940795994,
-        9991748517474737, 13920169278362314, 63675045577996314,
-        9853433044423600, 8035557461801026, 57762428873527925,
-        10971748337416119, 30708069929342391, 35304531073323056,
-        74681868667921862, 4598310885835408, 194068001033447611,
-        44744794608484063, 128048678468233851, 61398546699259529,
-        28118135734544055, 55287024053266251, 17564333542355796,
-        30105059785170628, 13074715680636571, 12624839102519184,
-        5909118797334551, 44067911108829631, 80901820057234369,
-        29983841822035657, 3111033626678120, 56055167090094667,
-        36918412124493904, 83390585036156095, 1667623468653129,
-        126451123559935330, 13128189873249741, 23424605569357598,
-        8019509209376302, 88347006485829618, 2797954171505209,
-        11382256530431056, 66165878729366285, 2787148076279624,
-        20795391085073308, 142699309776712426, 42413481982353202,
-        21249846663489374, 135508195851363971, 261530593155492,
-        65735867109004198, 10744475487415644, 41204202908876519,
-        102043804233227067, 142517813587459710, 24695569700034265,
-        108748127783445795, 101971308726405527, 38887565990448006,
-        103498908244237462, 94695575630165705, 60240806105722837,
-        9646307830059835, 19255578465757478, 34471767607596998,
-        5685187937426200, 31829551987215286, 13616048838912635,
-        25184831242953759, 14417366777521590, 37064059552713772,
-        3033113895350854, 5191632450608742, 146341109503327012,
-        156590079242801998, 17300687947001737, 34620875209026277,
-        71373905262844640, 56189483757001070, 110876827368004702,
-        96808376633596403, 42247040309219829, 35875807443554023,
-        26130401147403247, 44176644943472856, 25626294473873061,
-        20915035622628184, 184388894131164911, 7594062065944521,
-        97853556634076165, 35563392508734417, 27539112482274769,
-        22959186333280730, 21386137353824488, 24620354376094036,
-        35920917529998096, 6624682608098277, 11219062568546792,
-        72882798587813671, 14912027969644858, 27228740866559848,
-        105403129441109219, 28266013502625795, 27398409827342045,
-        27052297407082121, 52249695356106581, 8168775721601861,
-        33573531459298906, 52966175500182171, 16788513626945106,
-        27219837536740391, 75810378006175208, 74785443624135210,
-        9509120959458506, 6683288823138342, 18333634903144794,
-        22045121991861571, 43037955519778044, 4696816028734021,
-        6951078643954329, 36618954585823496, 11225289160533895,
-        47379742535648623, 55053311741533782
-    ], dtype=np.uint64)
+    ######### A specific 128-dimensional query vector #########
+    # VOCAB = [f"w{i}" for i in range(200)]
+
+    # np.random.seed(123)
+    # query_words = np.random.choice(VOCAB, size=40, replace=True)
+    # query_doc = " ".join(query_words)
+    # print("Query document:", query_doc)
+
+    # shingles = shingle_document(query_doc, k=1, by_word=True)
+
+    # mh = MinHash(num_perm=128, seed=42)
+
+    # query_vector = mh.signature(shingles)
+
+    query_vector = data[1025].copy()
+    print("Query MinHash signature shape:", query_vector.shape)
+    print("Query MinHash signature (sample 10):", query_vector[:10])
+    ######### A specific 128-dimensional query vector #########
 
     # Build lsh banding
     lsh_index = build_minhash_lsh_index(data=data)

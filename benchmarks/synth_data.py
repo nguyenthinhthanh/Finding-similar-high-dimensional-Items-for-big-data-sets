@@ -185,12 +185,12 @@ def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_samp
 if __name__ == "__main__":
     # parameters: tweak to your needs
     N_DOCS = 20000
-    VOCAB = 2000
+    VOCAB = 20
     AVG_WORDS = 40
     SIGMA_WORDS = 10.0
     OUT_DIR = "data"
     NUM_PERM = 128
-    K_SHINGLE = 3
+    K_SHINGLE = 1
     BY_WORD = True
     SEED = 42
 

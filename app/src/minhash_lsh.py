@@ -40,7 +40,13 @@ class MinHashLSHIndex:
         self._build_tables()
 
     def _build_tables(self):
-        # Build tables once. Use tobytes() as key (fast).
+        """
+        Build the LSH tables.
+        For each data signature:
+          - Split into bands
+          - Convert each band to bytes (fast hashing)
+          - Insert index into corresponding bucket (capped by max_bucket_size)
+        """
         for idx in range(self.N):
             sig = self.data[idx]
             for b in range(self.bands):
@@ -61,6 +67,11 @@ class MinHashLSHIndex:
             key = q[start:start+self.rows].tobytes()
             bucket = self.tables[b].get(key)
             if bucket:
+                # print(f"Band {b}, key={key.hex()[:8]}..., bucket size={len(bucket)}")
+                # for global_idx in bucket:
+                #     shard_idx = global_idx // 5000
+                #     row_idx = global_idx % 5000
+                #     print(f"  global_idx={global_idx}, (shard={shard_idx}, row={row_idx})")
                 cand_set.update(bucket)
             if len(cand_set) >= max_candidates:
                 break
@@ -80,24 +91,6 @@ class MinHashLSHIndex:
         # Indices into cand_list (descending)
         top_idxs = np.argsort(sims)[-k:][::-1]
         return cand_list[top_idxs], sims[top_idxs]
-    
-def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
-    """
-    Wrapper that calls a prebuilt MinHashLSHIndex for each query.
-    lsh_index must be built once and passed in (not None).
-    """
-    if lsh_index is None:
-        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
-    all_results = []
-    for q in queries:
-        ids, sims = lsh_index.query(q, k=k)
-        # if fewer than k, pad with random indices or leave as is (we'll return array rows of length k)
-        if len(ids) < k:
-            # fallback: pad with -1 to maintain shape, caller can handle if needed
-            pad = np.full(k - len(ids), -1, dtype=int)
-            ids = np.concatenate([ids, pad])
-        all_results.append(ids[:k])
-    return np.vstack(all_results)
 
 def build_minhash_lsh_index(data, bands=BANDS, max_bucket_size=5000, verbose=True):
     """
