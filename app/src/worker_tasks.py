@@ -20,6 +20,7 @@ Notes:
 # Add current directory to Python import path (so local imports work)
 sys.path.append(os.path.dirname(__file__))
 from qed import query_dependent_bins, quantify_score
+from minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
 
 SHARD_DIR = os.environ.get('SHARD_DIR', '/data/shards')
 

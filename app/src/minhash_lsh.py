@@ -91,6 +91,24 @@ class MinHashLSHIndex:
         # Indices into cand_list (descending)
         top_idxs = np.argsort(sims)[-k:][::-1]
         return cand_list[top_idxs], sims[top_idxs]
+    
+def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
+    """
+    Prebuilt MinHashLSHIndex for each query.
+    lsh_index must be built once and passed in (not None).
+    """
+    if lsh_index is None:
+        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
+    all_results = []
+    for q in queries:
+        ids, sims = lsh_index.query(q, k=k)
+        # if fewer than k, pad with random indices or leave as is (we'll return array rows of length k)
+        if len(ids) < k:
+            # fallback: pad with -1 to maintain shape, caller can handle if needed
+            pad = np.full(k - len(ids), -1, dtype=int)
+            ids = np.concatenate([ids, pad])
+        all_results.append(ids[:k])
+    return np.vstack(all_results)
 
 def build_minhash_lsh_index(data, bands=BANDS, max_bucket_size=5000, verbose=True):
     """

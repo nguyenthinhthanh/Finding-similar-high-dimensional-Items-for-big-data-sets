@@ -47,10 +47,11 @@ def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
     }
 
     curl_command = (
-        'curl -X POST http://localhost:8000/query '
+        'curl -X POST "http://localhost:8000/query" '
         '-H "Content-Type: application/json" '
-        f"-d '{json.dumps(payload)}'"
+        f'-d "{json.dumps(payload).replace('"', '\\"')}"'
     )
+
 
     out_path = os.path.join(out_dir, "curl_query.sh")
     with open(out_path, "w") as f:
