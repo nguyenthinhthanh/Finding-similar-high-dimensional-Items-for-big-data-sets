@@ -2,23 +2,18 @@
 import numpy as np
 import sys, os
 import argparse
-
-# Add current directory to Python import path (so local imports work)
-sys.path.append(os.path.dirname(__file__))
-from qed import build_histograms
 """
 Index Builder Script
 --------------------
 This script prepares data for distributed similarity search by:
 1. Splitting a large (N, D) dataset into smaller shards (.npy files) for parallel processing.
-2. Sampling data from shards to build a global histogram (used for quantization binning).
 
 Usage:
-    python src/index_builder.py \
-        --data data/raw.npy \
-        --out data/shards \
-        --edges-out data/hist_edges.npy \
-        --shard-size 5000
+    python app/src/index_builder.py \
+    --data data/sigs.npy \
+    --out data/shards \
+    --shard-size 5000 \
+    --inspect
 """
 
 # ===============================================================
@@ -41,62 +36,42 @@ def split_and_save(data_path: str, out_dir: str, shard_size: int = 100000):
     print(f"Wrote {i} shards to {out_dir}")
 
 # ===============================================================
-# Print histogram metadata (for inspection / debugging)
+# Print shard for inspection / debugging
 # ===============================================================
-def print_hist_info(edges: np.ndarray, counts: np.ndarray):
+def print_hist_info(shard: np.ndarray, name: str):
     """
-    Print summary information about histogram edges and counts for inspection.
+    Print summary information about a single shard for inspection.
     """
-    print("\n--- Histogram Info ---")
-    print(f"Edges shape: {edges.shape}")
-    print(f"Counts shape: {counts.shape}")
-    print(f"Edges (first 5 rows):\n{edges[:5]}")
-    print(f"Counts (first 5 rows):\n{counts[:5]}")
-    print(f"Edges min={edges.min():.4f}, max={edges.max():.4f}")
-    print(f"Counts min={counts.min()}, max={counts.max()}")
-    print("----------------------\n")
+    print(f"\n--- Histogram Info for {name} ---")
+    print(f"Shape: {shard.shape}")
+    print(f"First 2 rows:\n{shard[:2]}")
+    print(f"Min={shard.min():.4f}, Max={shard.max():.4f}")
+    print("----------------------")
 
-# ===============================================================
-# Build a global histogram (quantization edges)
-# ===============================================================
-def build_global_hist(edges_out: str, shards_dir: str, n_bins: int = 256):
+def print_all_shards_info(shard_dir: str):
     """
-    Build global histogram edges from sampled shards.
-    
-    Parameters:
-        edges_out (str): Path to save the resulting histogram edges (.npy file).
-        shards_dir (str): Directory containing data shards (.npy files).
-        n_bins (int): Number of histogram bins per feature dimension.
-    
-    Notes:
-        - Randomly collects samples (up to 200,000 rows total) from shards.
-        - Uses these samples to estimate global bin edges for quantization.
-        - These edges will later be used by distributed workers for vector quantization.
+    Iterate through all .npy shard files in a directory and print info for each.
     """
-    # Naive: sample from shards to build global hist
-    sample = []
-    for fn in os.listdir(shards_dir):
-        if fn.endswith('.npy'):
-            arr = np.load(os.path.join(shards_dir, fn))
-            sample.append(arr)
-            if sum(x.shape[0] for x in sample) >= 200000:
-                raise ValueError("Error: Total sample size exceeded 200000")
-                break
-    sample = np.vstack(sample)
-    N, D = sample.shape
-    edges, counts = build_histograms(sample, n_bins=n_bins)
-    np.save(edges_out, edges)
-    print(f"Saved edges to {edges_out}")
+    shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".npy")])
+    if not shard_files:
+        print(f"No shard files found in {shard_dir}")
+        return
 
-    # Print info for debugging / verification
-    # print_hist_info(edges, counts)
+    for fname in shard_files:
+        path = os.path.join(shard_dir, fname)
+        shard = np.load(path)
+        print_hist_info(shard, fname)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--shard-size', type=int, default=100000)
-    parser.add_argument('--edges-out', default='/data/hist_edges.npy')
+    parser.add_argument('--inspect', action='store_true', help="Print info of all shards after splitting")
     args = parser.parse_args()
+
     split_and_save(args.data, args.out, shard_size=args.shard_size)
-    build_global_hist(args.edges_out, args.out)
+
+    if args.inspect:
+        print_all_shards_info(args.out)
