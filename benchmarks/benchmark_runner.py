@@ -1,12 +1,13 @@
 # benchmarks/benchmark_runner.py
 import numpy as np
 import time
+import json
 import sys, os
 import pickle
 import pandas as pd
 from collections import defaultdict
 from sklearn.metrics.pairwise import euclidean_distances
-from app.src.minhash_lsh import build_minhash_lsh_index, MinHashLSHIndex
+from app.src.minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
 from benchmarks.synth_data import MinHash, shingle_document
 
 # ------------------------------------------------------------
@@ -19,6 +20,47 @@ with open("data/docs.pkl", "rb") as f:
     docs = pickle.load(f)
 with open("data/ids.pkl", "rb") as f:
     ids = pickle.load(f)
+
+import numpy as np
+import json
+import os
+
+def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
+    """
+    Create the file curl_query.sh to check a specific vector query.
+    
+    Parameters:
+    data_path (str): path to the .npy file containing vector data
+    index (int): index of the vector to check
+    k (int): number of top-k results to retrieve
+    out_dir (str): directory to save the curl_query.sh file
+    """
+    # Load data
+    data = np.load(data_path)
+    query_vector = data[index].tolist()
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    payload = {
+        "vector": query_vector,
+        "k": k
+    }
+
+    curl_command = (
+        'curl -X POST http://localhost:8000/query '
+        '-H "Content-Type: application/json" '
+        f"-d '{json.dumps(payload)}'"
+    )
+
+    out_path = os.path.join(out_dir, "curl_query.sh")
+    with open(out_path, "w") as f:
+        f.write(curl_command + "\n")
+
+    # print(f"Saved curl command to: {out_path}")
+
+# --- Ví dụ sử dụng ---
+# save_curl_for_query("data/sigs.npy", index=1025, k=5)
+
 
 # ========== Metrics ==========
 def recall_at_k(pred, truth, k):
@@ -66,24 +108,6 @@ def brute_force_nn(queries, data, k=10):
     dists = euclidean_distances(queries, data)
     idx = np.argsort(dists, axis=1)[:, :k]
     return idx
-
-def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
-    """
-    Wrapper that calls a prebuilt MinHashLSHIndex for each query.
-    lsh_index must be built once and passed in (not None).
-    """
-    if lsh_index is None:
-        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
-    all_results = []
-    for q in queries:
-        ids, sims = lsh_index.query(q, k=k)
-        # if fewer than k, pad with random indices or leave as is (we'll return array rows of length k)
-        if len(ids) < k:
-            # fallback: pad with -1 to maintain shape, caller can handle if needed
-            pad = np.full(k - len(ids), -1, dtype=int)
-            ids = np.concatenate([ids, pad])
-        all_results.append(ids[:k])
-    return np.vstack(all_results)
 
 def faiss_search(queries, data, k=10):
     """
@@ -184,23 +208,12 @@ if __name__ == "__main__":
     data = np.load("data/sigs.npy")
 
     ######### A specific 128-dimensional query vector #########
-    # VOCAB = [f"w{i}" for i in range(200)]
-
-    # np.random.seed(123)
-    # query_words = np.random.choice(VOCAB, size=40, replace=True)
-    # query_doc = " ".join(query_words)
-    # print("Query document:", query_doc)
-
-    # shingles = shingle_document(query_doc, k=1, by_word=True)
-
-    # mh = MinHash(num_perm=128, seed=42)
-
-    # query_vector = mh.signature(shingles)
-
     query_vector = data[1025].copy()
     print("Query MinHash signature shape:", query_vector.shape)
-    print("Query MinHash signature (sample 10):", query_vector[:10])
-    ######### A specific 128-dimensional query vector #########
+    # print("Query MinHash signature (sample 10):", query_vector[:10])
+
+    # Save command for test
+    save_curl_for_query("data/sigs.npy", index=1025, k=5)
 
     # Build lsh banding
     lsh_index = build_minhash_lsh_index(data=data)
