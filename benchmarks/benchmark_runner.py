@@ -217,7 +217,7 @@ if __name__ == "__main__":
     # Pick one specific query vector for inspection
     query_vector = data[1025].copy()
     print("Query MinHash signature shape:", query_vector.shape)
-    # print("Query MinHash signature (sample 10):", query_vector[:10])
+    print("-----> Query MinHash signature (sample 10):", query_vector[:10])
 
     # Save command for test
     save_curl_for_query("data/sigs.npy", index=1025, k=5)

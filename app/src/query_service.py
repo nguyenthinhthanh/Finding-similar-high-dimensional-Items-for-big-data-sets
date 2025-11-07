@@ -42,7 +42,7 @@ class QueryRequest(BaseModel):
         k (int): The number of top results (nearest neighbors) to return.
             Defaults to 10 if not provided.
     """
-    vector: List[float]
+    vector: List[int]
     k: int = 10
 
 # -----------------------------------------------------------
@@ -154,7 +154,11 @@ def query(req: QueryRequest):
     print(f"[DEBUG] Received query: {req.json()}", flush=True)
 
     # Convert request vector to NumPy array
-    q = np.asarray(req.vector, dtype=float)
+    q = np.asarray(req.vector, dtype=np.uint64)
+    # --- DEBUG: Print first 10 elements and dtype ---
+    print(f"[DEBUG] Query vector dtype: {q.dtype}", flush=True)
+    print(f"[DEBUG] Query vector preview (first 10): {q[:10]}", flush=True)
+
     edges = GLOBAL_EDGES
     if edges is None:
         return {"error": "No edges precomputed"}

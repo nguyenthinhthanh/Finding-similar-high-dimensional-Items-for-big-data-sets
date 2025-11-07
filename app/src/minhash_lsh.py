@@ -60,6 +60,7 @@ class MinHashLSHIndex:
                 if idx == 1025:
                     print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
                     print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
+                    print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
                     print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
                     print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
                     print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
@@ -79,6 +80,7 @@ class MinHashLSHIndex:
             # --- DEBUG: print query band info ---
             print(f"[LSH DEBUG] Query Band={b}", flush=True)
             print(f"[LSH DEBUG] Query Signature preview (first 10 vals): {q[:10]}", flush=True)
+            print(f"[LSH DEBUG] Type: {type(q), q.dtype}", flush=True)
             print(f"[LSH DEBUG] Sub-signature for this band (q[{start}:{start+self.rows}]): {q[start:start+self.rows]}", flush=True)
             print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
             print(f"[LSH DEBUG] Position (start,end): ({start}, {start+self.rows})", flush=True)
