@@ -16,16 +16,13 @@ This file is intended to replace the previous numeric-vector generator when
 you want to run the MinHash + LSH (Jaccard) pipeline.
 """
 
-
-# large prime for modular hashing (fits in 64-bit Python int math)
+# Large prime for modular hashing (fits in 64-bit Python int math)
 _PRIME = (1 << 61) - 1
-
 
 def _stable_shingle_hash(sh: str) -> int:
     """Stable integer fingerprint for a shingle (use SHA1 then take 8 bytes)."""
     h = hashlib.sha1(sh.encode("utf-8")).digest()
     return int.from_bytes(h[:8], "big") % _PRIME
-
 
 class MinHash:
     """Simple MinHash signature generator using linear hashing family."""
@@ -33,7 +30,7 @@ class MinHash:
     def __init__(self, num_perm: int = 128, seed: int = 42):
         self.num_perm = int(num_perm)
         rng = np.random.RandomState(seed)
-        # coefficients a,b for linear family: h_i(x) = (a_i * x + b_i) mod PRIME
+        # Coefficients a,b for linear family: h_i(x) = (a_i * x + b_i) mod PRIME
         # ensure a_i non-zero
         self.a = rng.randint(1, _PRIME - 1, size=self.num_perm, dtype=np.int64)
         self.b = rng.randint(0, _PRIME - 1, size=self.num_perm, dtype=np.int64)
@@ -41,15 +38,15 @@ class MinHash:
     def signature(self, shingles: Set[str]) -> np.ndarray:
         """Compute minhash signature for a set of shingles. Returns 1D uint64 array."""
         if not shingles:
-            # empty set -> use max val sentinel
+            # Empty set -> use max val sentinel
             return np.full(self.num_perm, _PRIME, dtype=np.uint64)
 
-        # convert shingles to ints
+        # Convert shingles to ints
         sh_ints = np.array([_stable_shingle_hash(s) for s in shingles], dtype=np.int64)
-        # compute (a[:,None] * sh_ints[None,:] + b[:,None]) % PRIME => shape (num_perm, n_sh)
-        a = self.a.astype(object)[:, None]  # object to avoid overflow in intermediate (but Python handles big ints)
+        # Compute (a[:,None] * sh_ints[None,:] + b[:,None]) % PRIME => shape (num_perm, n_sh)
+        a = self.a.astype(object)[:, None]  # Object to avoid overflow in intermediate (but Python handles big ints)
         b = self.b.astype(object)[:, None]
-        # we do computation in Python ints via vectorization loop to be robust in modulus
+        # We do computation in Python ints via vectorization loop to be robust in modulus
         # For moderate doc sizes this is acceptable; for extreme scale consider optimized C extension.
         sig = np.empty(self.num_perm, dtype=np.uint64)
         for i in range(self.num_perm):
@@ -61,7 +58,6 @@ class MinHash:
         """Compute signatures for many documents. Returns array (N, num_perm) dtype uint64."""
         sigs = [self.signature(s) for s in shingles_list]
         return np.vstack(sigs).astype(np.uint64)
-
 
 # --------------------------
 # Shingling helpers
@@ -84,7 +80,6 @@ def shingle_document(doc: str, k: int = 5, by_word: bool = True) -> Set[str]:
             return {s}
         return {s[i:i + k] for i in range(len(s) - k + 1)}
 
-
 # --------------------------
 # Synthetic doc generator
 # --------------------------
@@ -102,20 +97,20 @@ def make_synthetic_docs(n_docs: int = 10000,
     rng = np.random.RandomState(seed)
     os.makedirs(out_dir, exist_ok=True)
 
-    # build a synthetic vocabulary: word0, word1, ...
+    # Build a synthetic vocabulary: word0, word1, ...
     vocab = [f"w{idx}" for idx in range(vocab_size)]
 
     docs = []
     ids = []
     for i in range(n_docs):
-        # number of words for this doc (clamp to >=1)
+        # Number of words for this doc (clamp to >=1)
         n_words = max(1, int(rng.normal(loc=avg_words, scale=sigma_words)))
         words = rng.choice(vocab, size=n_words, replace=True)
         doc_text = " ".join(words)
         docs.append(doc_text)
         ids.append(f"doc_{i:06d}")
 
-    # save original docs & ids (pickle)
+    # Save original docs & ids (pickle)
     with open(os.path.join(out_dir, "docs.pkl"), "wb") as f:
         pickle.dump(docs, f)
     with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
@@ -123,7 +118,6 @@ def make_synthetic_docs(n_docs: int = 10000,
 
     print(f"Saved {n_docs} synthetic docs to {out_dir}/docs.pkl and ids to ids.pkl")
     return docs, ids
-
 
 # --------------------------
 # Build MinHash signatures for a set of documents and save
@@ -142,18 +136,19 @@ def build_and_save_minhash_signatures(docs: List[str],
     Returns signatures array shape (N, num_perm).
     """
     os.makedirs(out_dir, exist_ok=True)
-    # shingle docs
+    # Shingle docs
     shingles_list = [shingle_document(d, k=k_shingle, by_word=by_word) for d in docs]
 
-    # build minhash
+    # Build minhash
     mh = MinHash(num_perm=num_perm, seed=seed)
-    sigs = mh.batch_signature(shingles_list)  # shape (N, num_perm), dtype uint64
+    # Shape (N, num_perm), dtype uint64
+    sigs = mh.batch_signature(shingles_list) 
 
-    # save signatures and ancillary info
+    # Save signatures and ancillary info
     np.save(os.path.join(out_dir, "sigs.npy"), sigs)
     with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
         pickle.dump(ids, f)
-    # store MH object params for query time (we only store seed/num_perm/k_shingle/by_word)
+    # Store MH object params for query time (we only store seed/num_perm/k_shingle/by_word)
     with open(os.path.join(out_dir, "minhash_meta.pkl"), "wb") as f:
         pickle.dump({"num_perm": num_perm, "k_shingle": k_shingle, "by_word": by_word, "seed": seed}, f)
 
@@ -163,7 +158,6 @@ def build_and_save_minhash_signatures(docs: List[str],
 
     print(f"Saved signatures to {out_dir}/sigs.npy (shape={sigs.shape}), metadata/minhash_meta.pkl")
     return sigs
-
 
 # --------------------------
 # Inspect / quick stats
@@ -178,12 +172,11 @@ def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_samp
     for i in range(min(n_sample, len(docs))):
         print(f" - id={ids[i]} len(doc)={len(docs[i])} -> {docs[i][:120]}...")
 
-
 # --------------------------
 # CLI / script entrypoint
 # --------------------------
 if __name__ == "__main__":
-    # parameters: tweak to your needs
+    # Parameters: tweak to your needs
     N_DOCS = 20000
     VOCAB = 20
     AVG_WORDS = 40

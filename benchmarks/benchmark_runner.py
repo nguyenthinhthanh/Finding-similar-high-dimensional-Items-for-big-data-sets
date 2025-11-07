@@ -10,21 +10,29 @@ from sklearn.metrics.pairwise import euclidean_distances
 from app.src.minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
 from benchmarks.synth_data import MinHash, shingle_document
 
-# ------------------------------------------------------------
-# Benchmark framework for comparing similarity search methods
-# (Brute-force, FAISS, LSH, etc.) on synthetic high-dimensional data.
-# ------------------------------------------------------------
+# ============================================================
+# benchmarks/benchmark_runner.py
+# ============================================================
+# Purpose:
+#   This script benchmarks and compares multiple similarity search
+#   algorithms (Brute-force, FAISS, LSH) on synthetic or real datasets.
+#
+#   It measures both performance (latency, throughput) and quality
+#   metrics (Recall@k, Precision@k, MRR) for top-k nearest neighbor search.
+#
+# ============================================================
 
-# Load docs & ids
+# ------------------------------------------------------------
+# Load text documents and their corresponding IDs
+# ------------------------------------------------------------
 with open("data/docs.pkl", "rb") as f:
     docs = pickle.load(f)
 with open("data/ids.pkl", "rb") as f:
     ids = pickle.load(f)
 
-import numpy as np
-import json
-import os
-
+# ------------------------------------------------------------
+# Utility: Generate a curl command for testing the REST API query
+# ------------------------------------------------------------
 def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
     """
     Create the file curl_query.sh to check a specific vector query.
@@ -57,13 +65,9 @@ def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
     with open(out_path, "w") as f:
         f.write(curl_command + "\n")
 
-    # print(f"Saved curl command to: {out_path}")
-
-# --- Ví dụ sử dụng ---
-# save_curl_for_query("data/sigs.npy", index=1025, k=5)
-
-
-# ========== Metrics ==========
+# ------------------------------------------------------------
+# Evaluation metrics for retrieval quality
+# ------------------------------------------------------------
 def recall_at_k(pred, truth, k):
     """
     Compute Recall@k:
@@ -99,7 +103,9 @@ def mean_reciprocal_rank(pred, truth):
     return np.mean(ranks)
 
 
-# ========== Search methods ==========
+# ------------------------------------------------------------
+# Similarity search methods
+# ------------------------------------------------------------
 def brute_force_nn(queries, data, k=10):
     """
     Brute-force nearest neighbor search (exact baseline).
@@ -121,7 +127,9 @@ def faiss_search(queries, data, k=10):
     _, I = index.search(queries, k)
     return I
 
-# ========== Benchmark runner ==========
+# ------------------------------------------------------------
+# Benchmark runner: executes all methods and compares performance
+# ------------------------------------------------------------
 def run_benchmarks(data, queries, methods, k=10):
     print(f"Running {len(methods)} methods on data {data.shape}, queries={queries.shape[0]}...")
     truth = brute_force_nn(queries, data, k)
@@ -172,7 +180,7 @@ def run_benchmarks(data, queries, methods, k=10):
                         # if signatures are integer types, convert to float for distance
                         dist = float(np.linalg.norm(query_vec.astype(float) - vector_value.astype(float)))
                     except Exception:
-                        # fallback: use sklearn pairwise for safety
+                        # Fallback: use sklearn pairwise for safety
                         from sklearn.metrics.pairwise import euclidean_distances
                         dist = float(euclidean_distances(query_vec.reshape(1, -1).astype(float),
                                                         vector_value.reshape(1, -1).astype(float))[0, 0])
@@ -203,12 +211,10 @@ SHARD_SIZE = 5000
 
 # ========== Main test ==========
 if __name__ == "__main__":
-    # Create synthetic data for test
-    # make_synthetic(20000, 128, "data/raw.npy")
-    # data = np.load("data/raw.npy")
+    # Load MinHash signatures (precomputed features)
     data = np.load("data/sigs.npy")
 
-    ######### A specific 128-dimensional query vector #########
+    # Pick one specific query vector for inspection
     query_vector = data[1025].copy()
     print("Query MinHash signature shape:", query_vector.shape)
     # print("Query MinHash signature (sample 10):", query_vector[:10])

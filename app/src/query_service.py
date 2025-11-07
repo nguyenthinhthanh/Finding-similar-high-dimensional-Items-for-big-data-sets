@@ -10,8 +10,7 @@ from typing import List, Tuple
 
 # Add current directory to Python import path (so local imports work)
 sys.path.append(os.path.dirname(__file__))
-
-logger = logging.getLogger("query_service")
+import worker_tasks
 
 # -----------------------------------------------------------
 # Dask-based Query Service
@@ -60,6 +59,9 @@ else:
     GLOBAL_EDGES = None
     raise FileNotFoundError(f"Precomputed edges file not found at {EDGES_PATH}")
 
+# ------------------------------------------------------------------
+# Helper: wait for expected Dask workers to appear
+# ------------------------------------------------------------------
 def wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3):
     """
     Wait until all expected Dask workers are connected or timeout.
@@ -79,7 +81,9 @@ def wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3):
     print(f"[Error] Timeout reached: only {len(workers) if 'workers' in locals() else 0}/{expected_count} workers.", flush=True)
     return workers if 'workers' in locals() else {}
 
-
+# ------------------------------------------------------------------
+# FastAPI startup event: ensure workers present and request LSH build
+# ------------------------------------------------------------------
 @app.on_event("startup")    
 def startup_event():
     """
@@ -102,6 +106,20 @@ def startup_event():
                 print(f"  - {addr}: {msg}", flush=True)
         except Exception as e:
             print(f"[Startup] client.run() failed during startup: {e}", flush=True)
+
+    print("[Startup] Building local LSH indices on workers...", flush=True)
+    # Choose bands and max_bucket_size consistent with index build settings
+    BANDS = 32
+    MAX_BUCKET = 5000
+    for wi, addr in enumerate(list(workers.keys())):
+        try:
+            # Eun build_local_lsh_init on specific worker addr with its rank
+            client.run(worker_tasks.build_local_lsh_init,
+                        wi, len(workers), BANDS, MAX_BUCKET,
+                        workers=[addr])
+            print(f"[Startup] Requested LSH build on worker {addr} (rank={wi})", flush=True)
+        except Exception as e:
+            print(f"[Startup] Failed LSH build init on worker {addr}: {e}", flush=True)
 
 # -----------------------------------------------------------
 # POST /query endpoint
