@@ -56,6 +56,16 @@ class MinHashLSHIndex:
                 if len(tbl[key]) < self.max_bucket_size:
                     tbl[key].append(idx)
 
+                # --- DEBUG: Check vector 1025 ---
+                if idx == 1025:
+                    print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
+                    print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
+                    print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
+                    print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
+                    print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
+                    print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
+                    print("\n", flush=True)
+
     def query(self, q: np.ndarray, k: int = 10, max_candidates: int = 2000, fallback_sample: int = 200):
         """
         Query a single signature q (1D array): returns (ids_array, sims_array)
@@ -66,6 +76,13 @@ class MinHashLSHIndex:
             start = b * self.rows
             key = q[start:start+self.rows].tobytes()
             bucket = self.tables[b].get(key)
+            # --- DEBUG: print query band info ---
+            print(f"[LSH DEBUG] Query Band={b}", flush=True)
+            print(f"[LSH DEBUG] Query Signature preview (first 10 vals): {q[:10]}", flush=True)
+            print(f"[LSH DEBUG] Sub-signature for this band (q[{start}:{start+self.rows}]): {q[start:start+self.rows]}", flush=True)
+            print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
+            print(f"[LSH DEBUG] Position (start,end): ({start}, {start+self.rows})", flush=True)
+            print("\n", flush=True)
             if bucket:
                 # print(f"Band {b}, key={key.hex()[:8]}..., bucket size={len(bucket)}")
                 # for global_idx in bucket:
@@ -77,9 +94,13 @@ class MinHashLSHIndex:
                 break
 
         if not cand_set:
-            cand_list = np.random.choice(self.N, size=min(fallback_sample, self.N), replace=False)
+            print("[LSH Debug] no candidates from buckets -> returning dummy (-1)", flush=True)
+            cand_list = np.array([-1], dtype=int)
+            sims = np.array([0.0], dtype=float)
+            return cand_list, sims
         else:
             cand_list = np.fromiter(cand_set, dtype=int)
+            print(f"[LSH Debug] cand_list size={cand_list.size}", flush=True)
 
         if cand_list.size == 0:
             return np.array([], dtype=int), np.array([], dtype=float)

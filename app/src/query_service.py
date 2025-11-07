@@ -10,7 +10,6 @@ from typing import List, Tuple
 
 # Add current directory to Python import path (so local imports work)
 sys.path.append(os.path.dirname(__file__))
-import worker_tasks
 
 # -----------------------------------------------------------
 # Dask-based Query Service
@@ -111,6 +110,7 @@ def startup_event():
     # Choose bands and max_bucket_size consistent with index build settings
     BANDS = 32
     MAX_BUCKET = 5000
+    import worker_tasks
     for wi, addr in enumerate(list(workers.keys())):
         try:
             # Eun build_local_lsh_init on specific worker addr with its rank
@@ -119,7 +119,19 @@ def startup_event():
                         workers=[addr])
             print(f"[Startup] Requested LSH build on worker {addr} (rank={wi})", flush=True)
         except Exception as e:
-            print(f"[Startup] Failed LSH build init on worker {addr}: {e}", flush=True)
+            print(f"[Error] Failed LSH build init on worker {addr}: {e}", flush=True)
+    
+    q = np.load("/data/sigs.npy")[1025]
+    print(client.run(
+    lambda qq: (lambda npmod=__import__('numpy'), wt=__import__('worker_tasks'):
+                {
+                    "has_local": False if wt.WORKER_LOCAL_DATA is None or wt.WORKER_LOCAL_DATA.size == 0 else True,
+                    "local_shape": None if wt.WORKER_LOCAL_DATA is None else wt.WORKER_LOCAL_DATA.shape,
+                    "dtype_match": None if wt.WORKER_LOCAL_DATA is None else (wt.WORKER_LOCAL_DATA.dtype == qq.dtype),
+                    "exact_matches": None if wt.WORKER_LOCAL_DATA is None else int(npmod.any(npmod.all(wt.WORKER_LOCAL_DATA == qq, axis=1)))
+                })(),
+    q), flush=True)
+
 
 # -----------------------------------------------------------
 # POST /query endpoint
