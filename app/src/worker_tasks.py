@@ -104,14 +104,14 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_
         return False
 
     # Stack into a single local array
-    local_data = np.vstack(arrays).astype(np.uint64)
+    local_data = np.vstack(arrays).astype(np.float32)
     WORKER_LOCAL_DATA = local_data
     WORKER_INDEX_MAP = index_map
 
     # build LSH index on local_data
     print(f"[Worker] Building LSH on local_data shape={local_data.shape} (bands={bands}) ...", flush=True)
-    lsh_index = build_minhash_lsh_index(local_data, bands=bands, max_bucket_size=max_bucket_size, verbose=False)
-    WORKER_LSH_INDEX = lsh_index
+    print("[Worker] Skipping LSH build because data is Float32 (Semantic Vectors). Using Scan mode.", flush=True)
+    WORKER_LSH_INDEX = None
 
     print(f"[Worker] Built LSH index successfully: local_rows={local_data.shape[0]}, shards={len(assigned)}", flush=True)
     return True
