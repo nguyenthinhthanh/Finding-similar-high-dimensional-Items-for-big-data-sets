@@ -1,210 +1,205 @@
 # benchmarks/synth_data.py
 import os
-import requests
-import zipfile
-import sys
 import numpy as np
-import pandas as pd
-from tqdm import tqdm
+import hashlib
+import pickle
+from typing import List, Set, Tuple
+"""
+Generate synthetic *documents* and MinHash signatures (for Jaccard similarity).
+Saves:
+ - data/sigs.npy      : numpy array shape (n_docs, num_perm) dtype uint64
+ - data/ids.pkl       : list of ids (strings or ints)
+ - data/docs.pkl      : list of original document strings
+ - data/shingles.pkl  : optional list of sets (each doc's shingles)
 
-# --- KIỂM TRA THƯ VIỆN ---
-try:
-    import pyarrow
-except ImportError:
-    print("LỖI: Thiếu thư viện 'pyarrow'. Hãy chạy: pip install pyarrow")
-    sys.exit(1)
+This file is intended to replace the previous numeric-vector generator when
+you want to run the MinHash + LSH (Jaccard) pipeline.
+"""
 
-try:
-    import gensim.downloader as api
-    from gensim.models import KeyedVectors
-except ImportError:
-    print("LỖI: Thiếu thư viện 'gensim'. Hãy chạy: pip install gensim")
-    sys.exit(1)
+# Large prime for modular hashing (fits in 64-bit Python int math)
+_PRIME = (1 << 61) - 1
 
-# ================== CẤU HÌNH ==================
+def _stable_shingle_hash(sh: str) -> int:
+    """Stable integer fingerprint for a shingle (use SHA1 then take 8 bytes)."""
+    h = hashlib.sha1(sh.encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big") % _PRIME
 
-DATA_DIR = "data"
+class MinHash:
+    """Simple MinHash signature generator using linear hashing family."""
 
-# URLs & Paths
-GLOVE_URL = "https://nlp.stanford.edu/data/glove.840B.300d.zip"
-GLOVE_ZIP = os.path.join(DATA_DIR, "glove.840B.300d.zip")
-GLOVE_TXT = os.path.join(DATA_DIR, "glove.840B.300d.txt")
+    def __init__(self, num_perm: int = 128, seed: int = 42):
+        self.num_perm = int(num_perm)
+        rng = np.random.RandomState(seed)
+        # Coefficients a,b for linear family: h_i(x) = (a_i * x + b_i) mod PRIME
+        # ensure a_i non-zero
+        self.a = rng.randint(1, _PRIME - 1, size=self.num_perm, dtype=np.int64)
+        self.b = rng.randint(0, _PRIME - 1, size=self.num_perm, dtype=np.int64)
 
-W2V_LOCAL = os.path.join(DATA_DIR, "word2vec-google-news-300.kv")
+    def signature(self, shingles: Set[str]) -> np.ndarray:
+        """Compute minhash signature for a set of shingles. Returns 1D uint64 array."""
+        if not shingles:
+            # Empty set -> use max val sentinel
+            return np.full(self.num_perm, _PRIME, dtype=np.uint64)
 
-# Output Paths
-X_PATH = os.path.join(DATA_DIR, "X.npy")            # Data chính (Full)
-META_PATH = os.path.join(DATA_DIR, "meta.parquet")  # Từ điển (Full)
+        # Convert shingles to ints
+        sh_ints = np.array([_stable_shingle_hash(s) for s in shingles], dtype=np.int64)
+        # Compute (a[:,None] * sh_ints[None,:] + b[:,None]) % PRIME => shape (num_perm, n_sh)
+        a = self.a.astype(object)[:, None]  # Object to avoid overflow in intermediate (but Python handles big ints)
+        b = self.b.astype(object)[:, None]
+        # We do computation in Python ints via vectorization loop to be robust in modulus
+        # For moderate doc sizes this is acceptable; for extreme scale consider optimized C extension.
+        sig = np.empty(self.num_perm, dtype=np.uint64)
+        for i in range(self.num_perm):
+            vals = (int(self.a[i]) * sh_ints + int(self.b[i])) % _PRIME
+            sig[i] = int(np.min(vals))
+        return sig
 
-RAW_PATH = os.path.join(DATA_DIR, "raw.npy")        # Data test (Subset)
-RAW_META_PATH = os.path.join(DATA_DIR, "meta_raw.parquet")
+    def batch_signature(self, shingles_list: List[Set[str]]) -> np.ndarray:
+        """Compute signatures for many documents. Returns array (N, num_perm) dtype uint64."""
+        sigs = [self.signature(s) for s in shingles_list]
+        return np.vstack(sigs).astype(np.uint64)
 
-# ================== HÀM HỖ TRỢ ==================
-
-def ensure_data_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-def is_clean_word(w: str) -> bool:
+# --------------------------
+# Shingling helpers
+# --------------------------
+def shingle_document(doc: str, k: int = 5, by_word: bool = True) -> Set[str]:
+    """Return a set of shingles for the document.
+    - if by_word=True: k is number of words
+    - else: k is number of characters (char-grams)
     """
-    Bộ lọc chất lượng:
-    - Chỉ lấy từ toàn chữ cái (A-Z, a-z).
-    - Độ dài >= 2 (bỏ các từ như 'a', 'I', 'k'...).
-    """
-    return w.isalpha() and len(w) >= 2
-
-def download_glove():
-    ensure_data_dir()
-    if not os.path.isfile(GLOVE_ZIP) and not os.path.isfile(GLOVE_TXT):
-        print(f"-> Đang tải GloVe từ {GLOVE_URL}...")
-        try:
-            resp = requests.get(GLOVE_URL, stream=True)
-            total_size = int(resp.headers.get("Content-Length", 0))
-            with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading GloVe", ascii=".=") as pbar:
-                with open(GLOVE_ZIP, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-            print("-> Tải GloVe hoàn tất.")
-        except Exception as e:
-            print(f"Lỗi khi tải GloVe: {e}")
-            sys.exit(1)
-
-def extract_glove():
-    ensure_data_dir()
-    if os.path.isfile(GLOVE_TXT):
-        print(f"-> Đã có {GLOVE_TXT}, bỏ qua giải nén.")
-        return
-    if not os.path.isfile(GLOVE_ZIP):
-        print(f"LỖI: Không tìm thấy {GLOVE_ZIP}.")
-        sys.exit(1)
-        
-    print(f"-> Đang giải nén {GLOVE_ZIP}...")
-    with zipfile.ZipFile(GLOVE_ZIP, "r") as z:
-        z.extract("glove.840B.300d.txt", path=DATA_DIR)
-    print("-> Giải nén xong.")
-
-# ================== LOGIC CHÍNH (FULL DATA) ==================
-
-def make_data() -> np.ndarray:
-    """
-    Tạo bộ dữ liệu FULL (Không giới hạn số lượng).
-    """
-    ensure_data_dir()
-
-    # 1. Xử lý GloVe
-    download_glove()
-    extract_glove()
-
-    words = []
-    sources = []
-    vectors = []
-
-    print(f"\n[1/4] Đang đọc TOÀN BỘ GloVe (có thể mất thời gian)...")
-    try:
-        # Số dòng chuẩn của glove.840B.300d để hiển thị thanh tiến trình
-        total_lines = 2196017 
-        
-        with open(GLOVE_TXT, "r", encoding="utf8", errors="ignore") as f:
-            for line in tqdm(f, total=total_lines, desc="Processing GloVe"):
-                parts = line.rstrip().split(" ")
-                if len(parts) < 301: continue 
-                
-                word = parts[0]
-                if not is_clean_word(word): continue
-                
-                try:
-                    vec = np.asarray(parts[1:], dtype=np.float32)
-                except ValueError: continue
-                
-                if vec.shape[0] != 300: continue
-                
-                words.append(word)
-                sources.append("glove")
-                vectors.append(vec)
-    except FileNotFoundError:
-        print(f"Lỗi: Không đọc được file {GLOVE_TXT}")
-        sys.exit(1)
-
-    print(f"-> Đã lấy {len(words)} từ GloVe.")
-
-    # 2. Xử lý Word2Vec (Google News)
-    print(f"\n[2/4] Đang xử lý TOÀN BỘ Word2Vec...")
-    wv = None
-    if not os.path.isfile(W2V_LOCAL):
-        print("-> Đang tải model word2vec-google-news-300 (khoảng 1.6GB)...")
-        try:
-            wv = api.load("word2vec-google-news-300")
-            wv.save(W2V_LOCAL)
-        except Exception as e:
-            print(f"CẢNH BÁO: Không tải được Word2Vec ({e}). Chỉ dùng GloVe.")
+    if doc is None:
+        return set()
+    if by_word:
+        toks = doc.split()
+        if len(toks) < k:
+            return {" ".join(toks)}
+        return {" ".join(toks[i:i + k]) for i in range(len(toks) - k + 1)}
     else:
-        print(f"-> Load Word2Vec từ cache local: {W2V_LOCAL}")
-        try:
-            wv = KeyedVectors.load(W2V_LOCAL, mmap='r')
-        except Exception as e:
-            print(f"Lỗi load cache Word2Vec: {e}. Bỏ qua W2V.")
+        s = doc
+        if len(s) < k:
+            return {s}
+        return {s[i:i + k] for i in range(len(s) - k + 1)}
 
-    if wv:
-        existing_words = set(words)
-        added_count = 0
-        for word in tqdm(wv.index_to_key, desc="Processing Word2Vec"):
-            if not is_clean_word(word): continue
-            if word in existing_words: continue 
-            
-            vec = wv[word]
-            if vec.shape[0] != 300: continue
-            
-            words.append(word)
-            sources.append("w2v")
-            vectors.append(vec.astype(np.float32))
-            added_count += 1
-        print(f"-> Đã thêm {added_count} từ từ Word2Vec.")
+# --------------------------
+# Synthetic doc generator
+# --------------------------
+def make_synthetic_docs(n_docs: int = 10000,
+                        vocab_size: int = 1000,
+                        avg_words: int = 50,
+                        sigma_words: float = 10.0,
+                        out_dir: str = "data",
+                        seed: int = 42) -> Tuple[List[str], List[str]]:
+    """
+    Create synthetic documents by sampling words from a synthetic vocabulary.
 
-    # 3. Ghép và Lưu
-    print("\n[3/4] Đang ghép dữ liệu (Cẩn thận tràn RAM)...")
-    if len(vectors) == 0:
-        print("LỖI: Không tìm thấy vector nào hợp lệ!")
-        sys.exit(1)
+    Returns (docs, ids) and writes docs and ids to out_dir.
+    """
+    rng = np.random.RandomState(seed)
+    os.makedirs(out_dir, exist_ok=True)
 
-    # Bước tốn RAM nhất: vstack
-    X = np.vstack(vectors).astype(np.float32)
-    print(f"-> Final Shape X: {X.shape}, Size: {X.nbytes / 1024**3:.2f} GB")
-    
-    print("-> Đang lưu file X.npy (sẽ mất vài giây)...")
-    np.save(X_PATH, X)
-    
-    print("-> Đang lưu file meta.parquet...")
-    df_meta = pd.DataFrame({
-        "word": words,
-        "source": sources,
-        "id": np.arange(len(words), dtype=np.int32)
-    })
-    df_meta.to_parquet(META_PATH, index=False)
-    print(f"-> Đã xong dữ liệu chính.")
+    # Build a synthetic vocabulary: word0, word1, ...
+    vocab = [f"w{idx}" for idx in range(vocab_size)]
 
-    # 4. Tạo tập test nhỏ
-    print("\n[4/4] Đang tạo tập test nhỏ (raw.npy) giữ nguyên 300 chiều...")
-    # Lấy tối đa 10k mẫu để test
-    sample_size = min(10000, X.shape[0])
-    
-    np.random.seed(42)
-    idx = np.random.choice(X.shape[0], size=sample_size, replace=False)
-    
-    Y = X[idx, :] 
-    np.save(RAW_PATH, Y)
-    
-    df_meta_raw = df_meta.iloc[idx].copy()
-    df_meta_raw["orig_id"] = df_meta_raw["id"]
-    df_meta_raw["id"] = np.arange(len(df_meta_raw), dtype=np.int32)
-    df_meta_raw.to_parquet(RAW_META_PATH, index=False)
-    
-    print(f"-> Đã lưu tập test: {RAW_PATH}")
-    print("\n=== HOÀN TẤT: DỮ LIỆU ĐÃ SẴN SÀNG ===")
-    
-    return X
+    docs = []
+    ids = []
+    for i in range(n_docs):
+        # Number of words for this doc (clamp to >=1)
+        n_words = max(1, int(rng.normal(loc=avg_words, scale=sigma_words)))
+        words = rng.choice(vocab, size=n_words, replace=True)
+        doc_text = " ".join(words)
+        docs.append(doc_text)
+        ids.append(f"doc_{i:06d}")
 
-# ================== MAIN ==================
+    # Save original docs & ids (pickle)
+    with open(os.path.join(out_dir, "docs.pkl"), "wb") as f:
+        pickle.dump(docs, f)
+    with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
+        pickle.dump(ids, f)
 
+    print(f"Saved {n_docs} synthetic docs to {out_dir}/docs.pkl and ids to ids.pkl")
+    return docs, ids
+
+# --------------------------
+# Build MinHash signatures for a set of documents and save
+# --------------------------
+def build_and_save_minhash_signatures(docs: List[str],
+                                     ids: List[str],
+                                     num_perm: int = 128,
+                                     k_shingle: int = 3,
+                                     by_word: bool = True,
+                                     out_dir: str = "data",
+                                     save_shingles: bool = True,
+                                     seed: int = 42) -> np.ndarray:
+    """
+    Build MinHash signatures for docs and save to out_dir as sigs.npy (uint64).
+    Also saves shingles list if save_shingles True.
+    Returns signatures array shape (N, num_perm).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    # Shingle docs
+    shingles_list = [shingle_document(d, k=k_shingle, by_word=by_word) for d in docs]
+
+    # Build minhash
+    mh = MinHash(num_perm=num_perm, seed=seed)
+    # Shape (N, num_perm), dtype uint64
+    sigs = mh.batch_signature(shingles_list) 
+
+    # Save signatures and ancillary info
+    np.save(os.path.join(out_dir, "sigs.npy"), sigs)
+    with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
+        pickle.dump(ids, f)
+    # Store MH object params for query time (we only store seed/num_perm/k_shingle/by_word)
+    with open(os.path.join(out_dir, "minhash_meta.pkl"), "wb") as f:
+        pickle.dump({"num_perm": num_perm, "k_shingle": k_shingle, "by_word": by_word, "seed": seed}, f)
+
+    if save_shingles:
+        with open(os.path.join(out_dir, "shingles.pkl"), "wb") as f:
+            pickle.dump(shingles_list, f)
+
+    print(f"Saved signatures to {out_dir}/sigs.npy (shape={sigs.shape}), metadata/minhash_meta.pkl")
+    return sigs
+
+# --------------------------
+# Inspect / quick stats
+# --------------------------
+def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_sample: int = 5):
+    print("Signatures stats:")
+    print(f" - shape: {sigs.shape}")
+    print(f" - dtype: {sigs.dtype}")
+    print(f" - sample rows (first {n_sample}):")
+    print(sigs[:n_sample])
+    print("\nSample documents:")
+    for i in range(min(n_sample, len(docs))):
+        print(f" - id={ids[i]} len(doc)={len(docs[i])} -> {docs[i][:120]}...")
+
+# --------------------------
+# CLI / script entrypoint
+# --------------------------
 if __name__ == "__main__":
-    make_data()
+    # Parameters: tweak to your needs
+    N_DOCS = 20000
+    VOCAB = 20
+    AVG_WORDS = 40
+    SIGMA_WORDS = 10.0
+    OUT_DIR = "data"
+    NUM_PERM = 128
+    K_SHINGLE = 1
+    BY_WORD = True
+    SEED = 42
+
+    docs, ids = make_synthetic_docs(n_docs=N_DOCS,
+                                    vocab_size=VOCAB,
+                                    avg_words=AVG_WORDS,
+                                    sigma_words=SIGMA_WORDS,
+                                    out_dir=OUT_DIR,
+                                    seed=SEED)
+
+    sigs = build_and_save_minhash_signatures(docs, ids,
+                                            num_perm=NUM_PERM,
+                                            k_shingle=K_SHINGLE,
+                                            by_word=BY_WORD,
+                                            out_dir=OUT_DIR,
+                                            save_shingles=True,
+                                            seed=SEED)
+
+    inspect_signatures(sigs, docs, ids, n_sample=5)
