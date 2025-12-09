@@ -57,15 +57,15 @@ class MinHashLSHIndex:
                     tbl[key].append(idx)
 
                 # --- DEBUG: Check vector 1025 ---
-                # if idx == 1025:
-                #     print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
-                #     print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
-                #     print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
-                #     print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
-                #     print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
-                #     print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
-                #     print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
-                #     print("\n", flush=True)
+                if idx == 1025:
+                    print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
+                    print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
+                    print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
+                    print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
+                    print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
+                    print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
+                    print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
+                    print("\n", flush=True)
 
     def query(self, q: np.ndarray, k: int = 10, max_candidates: int = 2000, fallback_sample: int = 200):
         """
@@ -96,13 +96,13 @@ class MinHashLSHIndex:
                 break
 
         if not cand_set:
-            print("[LSH DEBUG] no candidates from buckets -> returning dummy (-1)", flush=True)
+            print("[LSH Debug] no candidates from buckets -> returning dummy (-1)", flush=True)
             cand_list = np.array([-1], dtype=int)
             sims = np.array([0.0], dtype=float)
             return cand_list, sims
         else:
             cand_list = np.fromiter(cand_set, dtype=int)
-            print(f"[LSH DEBUG] cand_list size={cand_list.size}", flush=True)
+            print(f"[LSH Debug] cand_list size={cand_list.size}", flush=True)
 
         if cand_list.size == 0:
             return np.array([], dtype=int), np.array([], dtype=float)
@@ -121,7 +121,7 @@ def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
     lsh_index must be built once and passed in (not None).
     """
     if lsh_index is None:
-        raise ValueError("[LSH] Error: lsh_index must be provided to minhash_lsh_search_wrapper")
+        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
     all_results = []
     for q in queries:
         ids, sims = lsh_index.query(q, k=k)
@@ -141,11 +141,11 @@ def build_minhash_lsh_index(data, bands=BANDS, max_bucket_size=5000, verbose=Tru
         A built LSH index ready for querying.
     """
     if verbose:
-        print(f"[LSH] Info: Building MinHash-LSH index with bands={bands}, max_bucket_size={max_bucket_size}...", flush=True)
+        print(f"Building MinHash-LSH index with bands={bands}, max_bucket_size={max_bucket_size}...", flush=True)
     
     # Create and build the index
     lsh_index = MinHashLSHIndex(data, bands=bands, max_bucket_size=max_bucket_size)
     
     if verbose:
-        print(f"[LSH] Info: Built MinHashLSHIndex successfully: bands={bands}, rows={lsh_index.rows} \n", flush=True)
+        print(f"Built MinHashLSHIndex successfully: bands={bands}, rows={lsh_index.rows} \n", flush=True)
     return lsh_index
