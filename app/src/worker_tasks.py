@@ -40,8 +40,8 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
       list of (global_index, path) for shards assigned to this worker.
     """
     if not os.path.exists(SHARD_DIR):
-        print(f"[ERROR] Shard directory not found: {SHARD_DIR}", flush=True)
-        raise FileNotFoundError(f"Shard directory not found: {SHARD_DIR}")
+        print(f"[WORKER] Error: Shard directory not found: {SHARD_DIR}", flush=True)
+        raise FileNotFoundError(f"[WORKER] Error: Shard directory not found: {SHARD_DIR}")
     
     # Stable global list of shards
     all_files = sorted([f for f in os.listdir(SHARD_DIR) if f.endswith('.npy')])
@@ -56,7 +56,7 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
     ]
 
     # Debug print so you can see partitioning on worker logs
-    print(f"[Worker] Worker index={worker_rank}/{n_workers}, Total shards={S}, Assigned={len(assigned)}", flush=True)
+    print(f"[WORKER] Info: Worker index={worker_rank}/{n_workers}, Total shards={S}, Assigned={len(assigned)}", flush=True)
     for i, path in assigned:
         print(f"    -> Assigned shard index={i}, path={path}", flush=True)
 
@@ -89,7 +89,7 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_
         try:
             arr = np.load(path)
         except Exception as e:
-            print(f"[Error] Failed to load shard {path}: {e}", flush=True)
+            print(f"[WORKER] Error: Failed to load shard {path}: {e}", flush=True)
             continue
         arrays.append(arr)
         length = arr.shape[0]
@@ -100,7 +100,7 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_
         WORKER_LOCAL_DATA = np.empty((0, 0), dtype=np.uint64)
         WORKER_LSH_INDEX = None
         WORKER_INDEX_MAP = []
-        print("[Error] No local shards loaded; LSH index not built.", flush=True)
+        print("[WORKER] Error: No local shards loaded; LSH index not built.", flush=True)
         return False
 
     # Stack into a single local array
@@ -109,11 +109,11 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_
     WORKER_INDEX_MAP = index_map
 
     # build LSH index on local_data
-    print(f"[Worker] Building LSH on local_data shape={local_data.shape} (bands={bands}) ...", flush=True)
-    print("[Worker] Skipping LSH build because data is Float32 (Semantic Vectors). Using Scan mode.", flush=True)
+    print(f"[WORKER] Info: Building LSH on local_data shape={local_data.shape} (bands={bands}) ...", flush=True)
+    print("[WORKER] Info: Skipping LSH build because data is Float32 (Semantic Vectors). Using Scan mode.", flush=True)
     WORKER_LSH_INDEX = None
 
-    print(f"[Worker] Built LSH index successfully: local_rows={local_data.shape[0]}, shards={len(assigned)}", flush=True)
+    print(f"[WORKER] Info: Built LSH index successfully: local_rows={local_data.shape[0]}, shards={len(assigned)}", flush=True)
     return True
 
 # ---------------------------------------------------------------------
@@ -125,13 +125,13 @@ def _local_idx_to_shard_row(local_idx: int):
     Uses WORKER_INDEX_MAP which contains tuples (shard_idx, start_offset, length).
     """
     if WORKER_INDEX_MAP is None or len(WORKER_INDEX_MAP) == 0:
-        raise RuntimeError("Index map not initialized on worker")
+        raise RuntimeError("[WORKER] Error: Index map not initialized on worker")
     # linear scan is fine because number of assigned shards per worker is typically small
     for shard_idx, start, length in WORKER_INDEX_MAP:
         if start <= local_idx < start + length:
             return shard_idx, int(local_idx - start)
     # not found
-    raise IndexError(f"Local index {local_idx} not mapped to any shard")
+    raise IndexError(f"[WORKER] Error: Local index {local_idx} not mapped to any shard")
 
 # ---------------------------------------------------------------------
 # Main query-time worker function (invoked remotely by the driver)
@@ -148,9 +148,9 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: in
         # Query LSH index (it expects signature shape (num_perm,) uint-like)
         try:
             ids, sims = WORKER_LSH_INDEX.query(query, k=top_m)
-            print(f"[Worker Debug] Query result -> ids: {ids[:10]}, sims: {sims[:10]}", flush=True)
+            print(f"[WORKER] Debug: Query result -> ids: {ids[:10]}, sims: {sims[:10]}", flush=True)
         except Exception as e:
-            print(f"[Error] LSH query failed: {e}. Falling back to scanning.", flush=True)
+            print(f"[WORKER] Error: LSH query failed: {e}. Falling back to scanning.", flush=True)
             ids, sims = np.array([], dtype=int), np.array([], dtype=float)
 
         candidates = []
@@ -159,7 +159,7 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: in
                 shard_idx, row_idx = _local_idx_to_shard_row(int(local_idx))
             except Exception as e:
                 # Skip bad mapping
-                print(f"[Error] Mapping failed for local_idx={local_idx}: {e}", flush=True)
+                print(f"[WORKER] Error: Mapping failed for local_idx={local_idx}: {e}", flush=True)
                 continue
             preview = WORKER_LOCAL_DATA[local_idx][:10].tolist() if WORKER_LOCAL_DATA.size else []
             candidates.append(((shard_idx, row_idx), float(score), preview))
@@ -168,7 +168,7 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: in
         return candidates[:top_m]
 
     # --- Fallback: scan assigned shards and score each point (slower) ---
-    print("[Error] No LSH index present, performing full scan on assigned shards...", flush=True)
+    print("[WORKER] Error: No LSH index present, performing full scan on assigned shards...", flush=True)
     candidates = []
     shards = list_local_shards(worker_rank, n_workers)
     for si, shard_path in shards:

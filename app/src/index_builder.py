@@ -27,13 +27,13 @@ def split_and_save(data_path: str, out_dir: str, shard_size: int = 100000):
     """
     os.makedirs(out_dir, exist_ok=True)
     
-    print(f"Loading data from {data_path} (mmap mode)...")
+    print(f"[INDEX BUILDER] Info: Loading data from {data_path} (mmap mode)...")
     # TỐI ƯU: Sử dụng mmap_mode='r' để không load toàn bộ file vào RAM
     # Giúp cắt file 10GB hay 100GB vẫn chạy tốt trên laptop RAM 4GB
     arr = np.load(data_path, mmap_mode='r') 
     
     N = arr.shape[0]
-    print(f"Original Data Shape: {arr.shape}, Dtype: {arr.dtype}")
+    print(f"[INDEX BUILDER] Info: Original Data Shape: {arr.shape}, Dtype: {arr.dtype}")
     
     i = 0
     for start in range(0, N, shard_size):
@@ -46,10 +46,10 @@ def split_and_save(data_path: str, out_dir: str, shard_size: int = 100000):
         np.save(out_path, shard)
         
         if i % 5 == 0:
-            print(f"  -> Saved shard_{i}.npy ({shard.shape[0]} rows)")
+            print(f"[INDEX BUILDER] Info: Saved shard_{i}.npy ({shard.shape[0]} rows)")
         i += 1
         
-    print(f"Successfully wrote {i} shards to {out_dir}")
+    print(f"[INDEX BUILDER] Info: Successfully wrote {i} shards to {out_dir}")
 
 # ===============================================================
 # Print shard for inspection / debugging
@@ -62,9 +62,9 @@ def print_hist_info(shard: np.ndarray, name: str):
     print(f"Shape: {shard.shape}")
     print(f"Dtype: {shard.dtype}")
     # Chỉ in 2 dòng đầu để xem mẫu
-    print(f"Preview (First 2 rows):\n{shard[:2]}")
+    print(f"[INDEX BUILDER] Info: Preview (First 2 rows):\n{shard[:2]}")
     # Với float32, in min/max giúp kiểm tra xem vector có bị chuẩn hóa không
-    print(f"Min={shard.min():.4f}, Max={shard.max():.4f}")
+    print(f"[INDEX BUILDER] Info: Min={shard.min():.4f}, Max={shard.max():.4f}")
     print("----------------------")
 
 def print_all_shards_info(shard_dir: str):
@@ -77,7 +77,7 @@ def print_all_shards_info(shard_dir: str):
         return
 
     # Chỉ inspect tối đa 3 file đầu để đỡ rác màn hình nếu có quá nhiều shard
-    print(f"Inspecting first 3 shards in {shard_dir}...")
+    print(f"[INDEX BUILDER] Info: Inspecting first 3 shards in {shard_dir}...")
     for fname in shard_files[:3]:
         path = os.path.join(shard_dir, fname)
         shard = np.load(path)
