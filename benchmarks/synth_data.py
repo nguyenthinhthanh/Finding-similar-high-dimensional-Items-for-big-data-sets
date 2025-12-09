@@ -4,50 +4,28 @@ import numpy as np
 import hashlib
 import pickle
 from typing import List, Set, Tuple
-"""
-Generate synthetic *documents* and MinHash signatures (for Jaccard similarity).
-Saves:
- - data/sigs.npy      : numpy array shape (n_docs, num_perm) dtype uint64
- - data/ids.pkl       : list of ids (strings or ints)
- - data/docs.pkl      : list of original document strings
- - data/shingles.pkl  : optional list of sets (each doc's shingles)
+import argparse
+import pandas as pd
 
-This file is intended to replace the previous numeric-vector generator when
-you want to run the MinHash + LSH (Jaccard) pipeline.
-"""
-
-# Large prime for modular hashing (fits in 64-bit Python int math)
+# Prime for modular hashing
 _PRIME = (1 << 61) - 1
 
 def _stable_shingle_hash(sh: str) -> int:
-    """Stable integer fingerprint for a shingle (use SHA1 then take 8 bytes)."""
     h = hashlib.sha1(sh.encode("utf-8")).digest()
     return int.from_bytes(h[:8], "big") % _PRIME
 
 class MinHash:
-    """Simple MinHash signature generator using linear hashing family."""
-
     def __init__(self, num_perm: int = 128, seed: int = 42):
         self.num_perm = int(num_perm)
         rng = np.random.RandomState(seed)
-        # Coefficients a,b for linear family: h_i(x) = (a_i * x + b_i) mod PRIME
-        # ensure a_i non-zero
         self.a = rng.randint(1, _PRIME - 1, size=self.num_perm, dtype=np.int64)
         self.b = rng.randint(0, _PRIME - 1, size=self.num_perm, dtype=np.int64)
 
     def signature(self, shingles: Set[str]) -> np.ndarray:
-        """Compute minhash signature for a set of shingles. Returns 1D uint64 array."""
         if not shingles:
-            # Empty set -> use max val sentinel
             return np.full(self.num_perm, _PRIME, dtype=np.uint64)
 
-        # Convert shingles to ints
         sh_ints = np.array([_stable_shingle_hash(s) for s in shingles], dtype=np.int64)
-        # Compute (a[:,None] * sh_ints[None,:] + b[:,None]) % PRIME => shape (num_perm, n_sh)
-        a = self.a.astype(object)[:, None]  # Object to avoid overflow in intermediate (but Python handles big ints)
-        b = self.b.astype(object)[:, None]
-        # We do computation in Python ints via vectorization loop to be robust in modulus
-        # For moderate doc sizes this is acceptable; for extreme scale consider optimized C extension.
         sig = np.empty(self.num_perm, dtype=np.uint64)
         for i in range(self.num_perm):
             vals = (int(self.a[i]) * sh_ints + int(self.b[i])) % _PRIME
@@ -55,18 +33,11 @@ class MinHash:
         return sig
 
     def batch_signature(self, shingles_list: List[Set[str]]) -> np.ndarray:
-        """Compute signatures for many documents. Returns array (N, num_perm) dtype uint64."""
         sigs = [self.signature(s) for s in shingles_list]
         return np.vstack(sigs).astype(np.uint64)
 
-# --------------------------
 # Shingling helpers
-# --------------------------
 def shingle_document(doc: str, k: int = 5, by_word: bool = True) -> Set[str]:
-    """Return a set of shingles for the document.
-    - if by_word=True: k is number of words
-    - else: k is number of characters (char-grams)
-    """
     if doc is None:
         return set()
     if by_word:
@@ -80,48 +51,77 @@ def shingle_document(doc: str, k: int = 5, by_word: bool = True) -> Set[str]:
             return {s}
         return {s[i:i + k] for i in range(len(s) - k + 1)}
 
-# --------------------------
-# Synthetic doc generator
-# --------------------------
+# Load real data produced by prepare_data (meta.parquet / meta_raw.parquet)
+def load_prepare_data(meta_path: str = "data/meta.parquet",
+                      use_raw: bool = False,
+                      limit: int = None,
+                      group_size: int = None,
+                      shuffle: bool = False,
+                      seed: int = 42) -> Tuple[List[str], List[str]]:
+    """
+    Load words from meta.parquet and return (docs, ids).
+    Modes:
+      - group_size is None or 1 => each word is a doc (doc_text = word)
+      - group_size >1 => group consecutive words into a doc of group_size words (joined by space)
+    If use_raw=True, use data/meta_raw.parquet instead.
+    """
+    path = "data/meta_raw.parquet" if use_raw else meta_path
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Meta file not found: {path}")
+
+    df = pd.read_parquet(path)
+    words = df["word"].astype(str).tolist()
+
+    if shuffle:
+        rng = np.random.RandomState(seed)
+        rng.shuffle(words)
+
+    if limit is not None:
+        words = words[:limit]
+
+    docs = []
+    ids = []
+    if group_size is None or group_size <= 1:
+        # Each word becomes a document
+        docs = words
+        # Use id from meta if present, otherwise create synthetic ids
+        if "id" in df.columns:
+            ids = df["id"].astype(str).tolist()[:len(docs)]
+        else:
+            ids = [f"w_{i:06d}" for i in range(len(docs))]
+    else:
+        # Group words into documents of group_size
+        for i in range(0, len(words), group_size):
+            chunk = words[i:i + group_size]
+            docs.append(" ".join(chunk))
+            ids.append(f"grp_{i//group_size:06d}")
+
+    return docs, ids
+
+# Synthetic generator (kept for fallback)
 def make_synthetic_docs(n_docs: int = 10000,
                         vocab_size: int = 1000,
                         avg_words: int = 50,
                         sigma_words: float = 10.0,
                         out_dir: str = "data",
                         seed: int = 42) -> Tuple[List[str], List[str]]:
-    """
-    Create synthetic documents by sampling words from a synthetic vocabulary.
-
-    Returns (docs, ids) and writes docs and ids to out_dir.
-    """
     rng = np.random.RandomState(seed)
     os.makedirs(out_dir, exist_ok=True)
-
-    # Build a synthetic vocabulary: word0, word1, ...
     vocab = [f"w{idx}" for idx in range(vocab_size)]
-
     docs = []
     ids = []
     for i in range(n_docs):
-        # Number of words for this doc (clamp to >=1)
         n_words = max(1, int(rng.normal(loc=avg_words, scale=sigma_words)))
         words = rng.choice(vocab, size=n_words, replace=True)
-        doc_text = " ".join(words)
-        docs.append(doc_text)
+        docs.append(" ".join(words))
         ids.append(f"doc_{i:06d}")
-
-    # Save original docs & ids (pickle)
     with open(os.path.join(out_dir, "docs.pkl"), "wb") as f:
         pickle.dump(docs, f)
     with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
         pickle.dump(ids, f)
-
     print(f"Saved {n_docs} synthetic docs to {out_dir}/docs.pkl and ids to ids.pkl")
     return docs, ids
 
-# --------------------------
-# Build MinHash signatures for a set of documents and save
-# --------------------------
 def build_and_save_minhash_signatures(docs: List[str],
                                      ids: List[str],
                                      num_perm: int = 128,
@@ -130,38 +130,21 @@ def build_and_save_minhash_signatures(docs: List[str],
                                      out_dir: str = "data",
                                      save_shingles: bool = True,
                                      seed: int = 42) -> np.ndarray:
-    """
-    Build MinHash signatures for docs and save to out_dir as sigs.npy (uint64).
-    Also saves shingles list if save_shingles True.
-    Returns signatures array shape (N, num_perm).
-    """
     os.makedirs(out_dir, exist_ok=True)
-    # Shingle docs
     shingles_list = [shingle_document(d, k=k_shingle, by_word=by_word) for d in docs]
-
-    # Build minhash
     mh = MinHash(num_perm=num_perm, seed=seed)
-    # Shape (N, num_perm), dtype uint64
-    sigs = mh.batch_signature(shingles_list) 
-
-    # Save signatures and ancillary info
+    sigs = mh.batch_signature(shingles_list)
     np.save(os.path.join(out_dir, "sigs.npy"), sigs)
     with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
         pickle.dump(ids, f)
-    # Store MH object params for query time (we only store seed/num_perm/k_shingle/by_word)
     with open(os.path.join(out_dir, "minhash_meta.pkl"), "wb") as f:
         pickle.dump({"num_perm": num_perm, "k_shingle": k_shingle, "by_word": by_word, "seed": seed}, f)
-
     if save_shingles:
         with open(os.path.join(out_dir, "shingles.pkl"), "wb") as f:
             pickle.dump(shingles_list, f)
-
     print(f"Saved signatures to {out_dir}/sigs.npy (shape={sigs.shape}), metadata/minhash_meta.pkl")
     return sigs
 
-# --------------------------
-# Inspect / quick stats
-# --------------------------
 def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_sample: int = 5):
     print("Signatures stats:")
     print(f" - shape: {sigs.shape}")
@@ -172,34 +155,38 @@ def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_samp
     for i in range(min(n_sample, len(docs))):
         print(f" - id={ids[i]} len(doc)={len(docs[i])} -> {docs[i][:120]}...")
 
-# --------------------------
-# CLI / script entrypoint
-# --------------------------
 if __name__ == "__main__":
-    # Parameters: tweak to your needs
-    N_DOCS = 20000
-    VOCAB = 20
-    AVG_WORDS = 40
-    SIGMA_WORDS = 10.0
-    OUT_DIR = "data"
-    NUM_PERM = 128
-    K_SHINGLE = 1
-    BY_WORD = True
-    SEED = 42
+    parser = argparse.ArgumentParser(description="Generate (or load) docs and build MinHash signatures.")
+    parser.add_argument("--use-prepare", action="store_true", help="Load words from prepare_data (meta.parquet).")
+    parser.add_argument("--use-raw", action="store_true", help="If using prepare data, load meta_raw.parquet instead of meta.parquet.")
+    parser.add_argument("--meta-path", default="data/meta.parquet", help="Path to meta.parquet (prepare_data output).")
+    parser.add_argument("--group-size", type=int, default=1, help="If >1, group N words into one document.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of words/docs to use (for testing).")
+    parser.add_argument("--num-perm", type=int, default=128)
+    parser.add_argument("--k-shingle", type=int, default=3)
+    parser.add_argument("--by-word", action="store_true", help="Shingle by word (default off if not provided).")
+    parser.add_argument("--out-dir", default="data")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--make-synth", action="store_true", help="Force create synthetic docs instead of loading prepare_data.")
+    args = parser.parse_args()
 
-    docs, ids = make_synthetic_docs(n_docs=N_DOCS,
-                                    vocab_size=VOCAB,
-                                    avg_words=AVG_WORDS,
-                                    sigma_words=SIGMA_WORDS,
-                                    out_dir=OUT_DIR,
-                                    seed=SEED)
+    if args.use_prepare and not args.make_synth:
+        print("[INFO] Loading real words from prepare_data...")
+        docs, ids = load_prepare_data(meta_path=args.meta_path, use_raw=args.use_raw,
+                                      limit=args.limit, group_size=args.group_size,
+                                      shuffle=False, seed=args.seed)
+    else:
+        # fallback to synthetic generator
+        print("[INFO] Creating synthetic docs (fallback)...")
+        docs, ids = make_synthetic_docs(n_docs=20000, vocab_size=20, avg_words=40,
+                                        sigma_words=10.0, out_dir=args.out_dir, seed=args.seed)
 
+    print("[INFO] Building MinHash signatures...")
     sigs = build_and_save_minhash_signatures(docs, ids,
-                                            num_perm=NUM_PERM,
-                                            k_shingle=K_SHINGLE,
-                                            by_word=BY_WORD,
-                                            out_dir=OUT_DIR,
+                                            num_perm=args.num_perm,
+                                            k_shingle=args.k_shingle,
+                                            by_word=args.by_word,
+                                            out_dir=args.out_dir,
                                             save_shingles=True,
-                                            seed=SEED)
-
+                                            seed=args.seed)
     inspect_signatures(sigs, docs, ids, n_sample=5)
