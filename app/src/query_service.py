@@ -51,12 +51,12 @@ class QueryRequest(BaseModel):
 # The edges array is shared across all queries.
 # It’s precomputed offline and stored at /data/hist_edges.npy.
 # -----------------------------------------------------------
-EDGES_PATH = os.environ.get('EDGES_PATH', '/data/hist_edges.npy')
-if os.path.exists(EDGES_PATH):
-    GLOBAL_EDGES = np.load(EDGES_PATH)
-else:
-    GLOBAL_EDGES = None
-    raise FileNotFoundError(f"Precomputed edges file not found at {EDGES_PATH}")
+# EDGES_PATH = os.environ.get('EDGES_PATH', '/data/hist_edges.npy')
+# if os.path.exists(EDGES_PATH):
+#     GLOBAL_EDGES = np.load(EDGES_PATH)
+# else:
+#     GLOBAL_EDGES = None
+#     raise FileNotFoundError(f"Precomputed edges file not found at {EDGES_PATH}")
 
 # ------------------------------------------------------------------
 # Helper: wait for expected Dask workers to appear
@@ -121,16 +121,16 @@ def startup_event():
         except Exception as e:
             print(f"[Error] Failed LSH build init on worker {addr}: {e}", flush=True)
     
-    q = np.load("/data/sigs.npy")[1025]
-    print(client.run(
-    lambda qq: (lambda npmod=__import__('numpy'), wt=__import__('worker_tasks'):
-                {
-                    "has_local": False if wt.WORKER_LOCAL_DATA is None or wt.WORKER_LOCAL_DATA.size == 0 else True,
-                    "local_shape": None if wt.WORKER_LOCAL_DATA is None else wt.WORKER_LOCAL_DATA.shape,
-                    "dtype_match": None if wt.WORKER_LOCAL_DATA is None else (wt.WORKER_LOCAL_DATA.dtype == qq.dtype),
-                    "exact_matches": None if wt.WORKER_LOCAL_DATA is None else int(npmod.any(npmod.all(wt.WORKER_LOCAL_DATA == qq, axis=1)))
-                })(),
-    q), flush=True)
+    # q = np.load("/data/sigs.npy")[1025]
+    # print(client.run(
+    # lambda qq: (lambda npmod=__import__('numpy'), wt=__import__('worker_tasks'):
+    #             {
+    #                 "has_local": False if wt.WORKER_LOCAL_DATA is None or wt.WORKER_LOCAL_DATA.size == 0 else True,
+    #                 "local_shape": None if wt.WORKER_LOCAL_DATA is None else wt.WORKER_LOCAL_DATA.shape,
+    #                 "dtype_match": None if wt.WORKER_LOCAL_DATA is None else (wt.WORKER_LOCAL_DATA.dtype == qq.dtype),
+    #                 "exact_matches": None if wt.WORKER_LOCAL_DATA is None else int(npmod.any(npmod.all(wt.WORKER_LOCAL_DATA == qq, axis=1)))
+    #             })(),
+    # q), flush=True)
 
 
 # -----------------------------------------------------------
@@ -159,9 +159,9 @@ def query(req: QueryRequest):
     print(f"[DEBUG] Query vector dtype: {q.dtype}", flush=True)
     print(f"[DEBUG] Query vector preview (first 10): {q[:10]}", flush=True)
 
-    edges = GLOBAL_EDGES
-    if edges is None:
-        return {"error": "No edges precomputed"}
+    # edges = GLOBAL_EDGES
+    # if edges is None:
+    #     return {"error": "No edges precomputed"}
 
     # Submit query tasks to all active Dask workers
     workers = list(client.scheduler_info()['workers'].keys())
@@ -171,10 +171,10 @@ def query(req: QueryRequest):
     futures = []
     for wi, w in enumerate(workers):
         f = client.submit(
-            lambda qq, ee, rank, total: __import__('worker_tasks').shard_qed_filter_local(
-                qq, ee, rank, total, top_m=100
+            lambda qq, rank, total: __import__('worker_tasks').shard_qed_filter_local(
+                qq, rank, total, top_m=100
             ),
-            q, edges, wi, len(workers),
+            q, wi, len(workers),
             workers=[w]
         )
         futures.append(f)

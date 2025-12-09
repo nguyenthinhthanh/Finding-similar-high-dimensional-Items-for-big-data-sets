@@ -136,7 +136,7 @@ def _local_idx_to_shard_row(local_idx: int):
 # ---------------------------------------------------------------------
 # Main query-time worker function (invoked remotely by the driver)
 # ---------------------------------------------------------------------
-def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: int, n_workers: int, top_m: int = 100) -> List[Tuple[Tuple[int,int], float, list]]:
+def shard_qed_filter_local(query: np.ndarray, worker_rank: int, n_workers: int, top_m: int = 100) -> List[Tuple[Tuple[int,int], float, list]]:
     """
     Run on a worker; return top_m candidate tuples:
       ((global_shard_idx, row_idx), score, preview_list)
@@ -167,15 +167,15 @@ def shard_qed_filter_local(query: np.ndarray, edges: np.ndarray, worker_rank: in
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[:top_m]
 
-    # --- Fallback: scan assigned shards and score each point (slower) ---
-    print("[Error] No LSH index present, performing full scan on assigned shards...", flush=True)
-    candidates = []
-    shards = list_local_shards(worker_rank, n_workers)
-    for si, shard_path in shards:
-        arr = np.load(shard_path)
-        for i, pt in enumerate(arr):
-            s = quantify_score(pt, query, edges)
-            preview = pt[:10].tolist()
-            candidates.append(((si, i), float(s), preview))
-    candidates.sort(key=lambda x: x[1], reverse=True)
+    # # --- Fallback: scan assigned shards and score each point (slower) ---
+    # print("[Error] No LSH index present, performing full scan on assigned shards...", flush=True)
+    # candidates = []
+    # shards = list_local_shards(worker_rank, n_workers)
+    # for si, shard_path in shards:
+    #     arr = np.load(shard_path)
+    #     for i, pt in enumerate(arr):
+    #         s = quantify_score(pt, query, edges)
+    #         preview = pt[:10].tolist()
+    #         candidates.append(((si, i), float(s), preview))
+    # candidates.sort(key=lambda x: x[1], reverse=True)
     return candidates[:top_m]
