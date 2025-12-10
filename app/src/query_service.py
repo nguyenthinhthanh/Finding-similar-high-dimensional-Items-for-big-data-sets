@@ -1,196 +1,172 @@
 # src/query_service.py
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from distributed import Client
 import numpy as np
 import sys, os
-import time
-import logging
-from typing import List, Tuple
+import pandas as pd
+import pickle
+from typing import List
 
-# Add current directory to Python import path (so local imports work)
+# --- CẤU HÌNH ---
 sys.path.append(os.path.dirname(__file__))
 
-# -----------------------------------------------------------
-# Dask-based Query Service
-# -----------------------------------------------------------
-# This service exposes a REST API (via FastAPI) that accepts
-# vector search queries, distributes the computation to Dask
-# workers, collects partial results, merges them, and returns
-# the top-k most similar candidates.
-# -----------------------------------------------------------
-
-# Initialize FastAPI app
 app = FastAPI()
-
-# Get the Dask scheduler address from environment variable.
-# This allows the service to connect to the distributed cluster.
 DASK_ADDR = os.environ.get('DASK_SCHEDULER_ADDRESS', 'tcp://scheduler:8786')
 client = Client(DASK_ADDR)
 
-# -----------------------------------------------------------
-# Request schema definition for /query endpoint
-# -----------------------------------------------------------
-class QueryRequest(BaseModel):
-    """
-    Represents the JSON request body schema for a query request.
-    Used by FastAPI (via Pydantic) to automatically parse and validate input.
+# Các đường dẫn file cấu hình
+META_PATH = os.environ.get('META_PATH', 'data/meta.parquet')
+MINHASH_META_PATH = os.environ.get('MINHASH_META', 'data/minhash_meta.pkl')
+SEMANTIC_CONFIG_PATH = 'data/semantic_config.pkl' # File quan trọng cho Semantic
+SHARD_SIZE = 5000 
 
-    Attributes:
-        vector (List[float]): The query feature vector (e.g., embedding)
-            that will be compared against database vectors for similarity.
-        k (int): The number of top results (nearest neighbors) to return.
-            Defaults to 10 if not provided.
-    """
-    vector: List[int]
+# Biến toàn cục (Global State)
+GLOBAL_META_DF = None
+GLOBAL_SEMANTIC_DATA = None # Chứa projections và vocab (cho Semantic)
+GLOBAL_MINHASH_CONFIG = None # Chứa config băm (cho MinHash)
+
+# Model nhận request
+class TextQueryRequest(BaseModel):
+    text: str
     k: int = 10
 
-# -----------------------------------------------------------
-# Load precomputed histogram edges (for quantization bins)
-# -----------------------------------------------------------
-# The edges array is shared across all queries.
-# It’s precomputed offline and stored at /data/hist_edges.npy.
-# -----------------------------------------------------------
-# EDGES_PATH = os.environ.get('EDGES_PATH', '/data/hist_edges.npy')
-# if os.path.exists(EDGES_PATH):
-#     GLOBAL_EDGES = np.load(EDGES_PATH)
-# else:
-#     GLOBAL_EDGES = None
-#     raise FileNotFoundError(f"Precomputed edges file not found at {EDGES_PATH}")
-
-# ------------------------------------------------------------------
-# Helper: wait for expected Dask workers to appear
-# ------------------------------------------------------------------
-def wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3):
-    """
-    Wait until all expected Dask workers are connected or timeout.
-    """
+def wait_for_workers(client, timeout=120): # Tăng time out lên 120s
     import time
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            sinfo = client.scheduler_info()
-            workers = sinfo.get("workers", {})
-            n = len(workers)
-            if n >= expected_count:
-                return workers
-        except Exception as e:
-            print(f"[Error] {e}", flush=True)
-        time.sleep(poll_interval)
-    print(f"[Error] Timeout reached: only {len(workers) if 'workers' in locals() else 0}/{expected_count} workers.", flush=True)
-    return workers if 'workers' in locals() else {}
+    print("[Startup] Đang quét tìm Worker...", flush=True)
+    start = time.time()
+    
+    while time.time() - start < timeout:
+        # Lấy danh sách worker từ Scheduler
+        workers = client.scheduler_info().get("workers", {})
+        
+        if len(workers) > 0:
+            print(f"[Startup] ✅ Đã tìm thấy {len(workers)} Worker(s) đang online!", flush=True)
+            # Chờ thêm 5s để Worker ổn định hẳn
+            time.sleep(5) 
+            return workers
+            
+        print(f"[Startup] ⏳ Chưa thấy Worker nào... Đợi tiếp... ({int(time.time() - start)}s)", flush=True)
+        time.sleep(2) # Ngủ 2s rồi check lại
+        
+    print("[CRITICAL] ❌ Hết giờ! Không tìm thấy Worker nào cả. Kiểm tra lại cửa sổ Worker đi!", flush=True)
+    return {}
 
-# ------------------------------------------------------------------
-# FastAPI startup event: ensure workers present and request LSH build
-# ------------------------------------------------------------------
 @app.on_event("startup")    
 def startup_event():
-    """
-    FastAPI lifecycle hook: called when the service starts.
-    Ensures all Dask workers are reachable and have required modules loaded.
-    """
-    print("[Startup] Waiting for Dask workers (timeout=30s)...", flush=True)
-    workers = wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3)
-
-    if not workers:
-        print("[Startup] WARNING: No workers detected; continuing but queries may fail.", flush=True)
-    else:
-        print("[Startup] Workers detected:", list(workers.keys()), flush=True)
-
-    if workers:
-        try:
-            responses = client.run(lambda: "worker ready")
-            print("[Startup] Connected workers:", responses, flush=True)
-            for addr, msg in responses.items():
-                print(f"  - {addr}: {msg}", flush=True)
-        except Exception as e:
-            print(f"[Startup] client.run() failed during startup: {e}", flush=True)
-
-    print("[Startup] Building local LSH indices on workers...", flush=True)
-    # Choose bands and max_bucket_size consistent with index build settings
-    BANDS = 32
-    MAX_BUCKET = 5000
-    import worker_tasks
-    for wi, addr in enumerate(list(workers.keys())):
-        try:
-            # Eun build_local_lsh_init on specific worker addr with its rank
-            client.run(worker_tasks.build_local_lsh_init,
-                        wi, len(workers), BANDS, MAX_BUCKET,
-                        workers=[addr])
-            print(f"[Startup] Requested LSH build on worker {addr} (rank={wi})", flush=True)
-        except Exception as e:
-            print(f"[Error] Failed LSH build init on worker {addr}: {e}", flush=True)
+    global GLOBAL_META_DF, GLOBAL_SEMANTIC_DATA, GLOBAL_MINHASH_CONFIG
     
-    # q = np.load("/data/sigs.npy")[1025]
-    # print(client.run(
-    # lambda qq: (lambda npmod=__import__('numpy'), wt=__import__('worker_tasks'):
-    #             {
-    #                 "has_local": False if wt.WORKER_LOCAL_DATA is None or wt.WORKER_LOCAL_DATA.size == 0 else True,
-    #                 "local_shape": None if wt.WORKER_LOCAL_DATA is None else wt.WORKER_LOCAL_DATA.shape,
-    #                 "dtype_match": None if wt.WORKER_LOCAL_DATA is None else (wt.WORKER_LOCAL_DATA.dtype == qq.dtype),
-    #                 "exact_matches": None if wt.WORKER_LOCAL_DATA is None else int(npmod.any(npmod.all(wt.WORKER_LOCAL_DATA == qq, axis=1)))
-    #             })(),
-    # q), flush=True)
+    print("[Startup] Connecting to Dask...", flush=True)
+    workers = wait_for_workers(client)
+    
+    # 1. Trigger Worker LSH Build (Logic này giống nhau cho cả 2 chế độ)
+    import worker_tasks
+    BANDS = 32; MAX_BUCKET = 5000
+    for wi, addr in enumerate(list(workers.keys())):
+        client.run(worker_tasks.build_local_lsh_init, wi, len(workers), BANDS, MAX_BUCKET, workers=[addr])
 
+    # 2. Load Metadata (ID -> Word) để trả kết quả
+    if os.path.exists(META_PATH):
+        try:
+            GLOBAL_META_DF = pd.read_parquet(META_PATH)
+            print(f"[Startup] Loaded Meta: {len(GLOBAL_META_DF)} words")
+        except:
+            print("[Warning] Lỗi đọc file Meta parquet")
 
-# -----------------------------------------------------------
-# POST /query endpoint
-# -----------------------------------------------------------
-@app.post('/query')
-def query(req: QueryRequest):
-    """
-    Receives a query request containing a feature vector and an optional k value.
-    Distributes the query to all Dask workers for local filtering, merges
-    their responses, and returns the top-k candidates.
+    # 3. TỰ ĐỘNG PHÁT HIỆN CHẾ ĐỘ (QUAN TRỌNG)
+    if os.path.exists(SEMANTIC_CONFIG_PATH):
+        print("[Startup] ---> PHÁT HIỆN CHẾ ĐỘ: SEMANTIC (NGỮ NGHĨA) <---")
+        with open(SEMANTIC_CONFIG_PATH, "rb") as f:
+            GLOBAL_SEMANTIC_DATA = pickle.load(f)
+            print("[Startup] Đã load Semantic Config (Projections & Mini Vocab)")
+            
+    elif os.path.exists(MINHASH_META_PATH):
+        print("[Startup] ---> PHÁT HIỆN CHẾ ĐỘ: MINHASH (MẶT CHỮ) <---")
+        with open(MINHASH_META_PATH, "rb") as f:
+            GLOBAL_MINHASH_CONFIG = pickle.load(f)
 
-    Steps:
-        1. Convert the input list to a NumPy array.
-        2. If no precomputed edges exist, return an error.
-        3. Submit local filtering tasks to all Dask workers.
-        4. Gather partial results from all workers.
-        5. Merge, sort, and truncate to top-k results.
-    """
-    # --- DEBUG: Print received JSON request ---
-    print(f"[DEBUG] Received query: {req.json()}", flush=True)
+@app.post('/search_text')
+def search_text(req: TextQueryRequest):
+    query_vector = None
+    
+    # === NHÁNH 1: XỬ LÝ THEO NGỮ NGHĨA (SEMANTIC) ===
+    if GLOBAL_SEMANTIC_DATA is not None:
+        projections = GLOBAL_SEMANTIC_DATA["projections"]
+        vocab = GLOBAL_SEMANTIC_DATA["mini_vocab"]
+        
+        # Bước 1: Tra từ trong từ điển mini
+        # (Vì ta không load hết 1.5 triệu vector lên RAM Service được, chỉ load top 50k)
+        word = req.text
+        if word not in vocab:
+            return {
+                "query": word, 
+                "results": [], 
+                "error": f"Từ '{word}' không có trong từ điển phổ biến (Top 50k). Hãy thử 'king', 'computer', 'school'..."
+            }
+        
+        # Bước 2: Lấy vector 300 chiều
+        vec_300d = vocab[word]
+        
+        # Bước 3: SimHash (Chiếu vector -> Signature)
+        # Dot product: (300,) dot (300, 128) -> (128,)
+        dots = np.dot(vec_300d, projections)
+        query_vector = (dots > 0).astype(np.uint64)
 
-    # Convert request vector to NumPy array
-    q = np.asarray(req.vector, dtype=np.uint64)
-    # --- DEBUG: Print first 10 elements and dtype ---
-    print(f"[DEBUG] Query vector dtype: {q.dtype}", flush=True)
-    print(f"[DEBUG] Query vector preview (first 10): {q[:10]}", flush=True)
+    # === NHÁNH 2: XỬ LÝ THEO MẶT CHỮ (MINHASH CŨ) ===
+    elif GLOBAL_MINHASH_CONFIG is not None:
+        # Import lại logic tạo shingle ở đây để tránh phụ thuộc file ngoài
+        import hashlib
+        _PRIME = (1 << 61) - 1
+        def _hash(s): return int.from_bytes(hashlib.sha1(s.encode("utf-8")).digest()[:8], "big") % _PRIME
+        
+        # Cấu hình MinHash
+        num_perm = GLOBAL_MINHASH_CONFIG["num_perm"]
+        k = GLOBAL_MINHASH_CONFIG.get("k_shingle", 3)
+        
+        # Tạo Shingle
+        if len(req.text) < k: shingles = {req.text}
+        else: shingles = {req.text[i:i+k] for i in range(len(req.text)-k+1)}
+        
+        # Tạo Signature
+        mh_a = np.random.RandomState(42).randint(1, _PRIME, size=num_perm, dtype=np.int64)
+        mh_b = np.random.RandomState(42).randint(0, _PRIME, size=num_perm, dtype=np.int64)
+        
+        sh_ints = np.array([_hash(s) for s in shingles], dtype=np.int64)
+        if len(sh_ints) == 0: query_vector = np.full(num_perm, _PRIME, dtype=np.uint64)
+        else:
+            vals = (mh_a[:, None] * sh_ints + mh_b[:, None]) % _PRIME
+            query_vector = np.min(vals, axis=1).astype(np.uint64)
 
-    # edges = GLOBAL_EDGES
-    # if edges is None:
-    #     return {"error": "No edges precomputed"}
+    # === GỬI ĐI TÌM KIẾM (CHUNG CHO CẢ 2) ===
+    if query_vector is None:
+        return {"error": "Hệ thống chưa sẵn sàng hoặc không xác định được chế độ."}
 
-    # Submit query tasks to all active Dask workers
+    # Gửi vector xuống các Worker
     workers = list(client.scheduler_info()['workers'].keys())
-    # DEBUG: Output the workers for inspection
-    print(f"[DEBUG] Active Dask workers: {workers}", flush=True)
-
     futures = []
     for wi, w in enumerate(workers):
         f = client.submit(
-            lambda qq, rank, total: __import__('worker_tasks').shard_qed_filter_local(
-                qq, rank, total, top_m=100
-            ),
-            q, wi, len(workers),
-            workers=[w]
+            lambda qq, rank, total: __import__('worker_tasks').shard_qed_filter_local(qq, rank, total, top_m=100),
+            query_vector, wi, len(workers), workers=[w]
         )
         futures.append(f)
-
-    # Each candidate: ((shard_idx, row_idx), score)
-    results = client.gather(futures)
-
-    # Merge candidate lists from all workers
-    merged = []
-    for r in results:
-        merged.extend(r)
-
-    # Sort candidates by similarity score (descending)
-    merged.sort(key=lambda x: x[1], reverse=True)
-    topk = merged[:req.k]
     
-    # NOTE: Further steps like resolving vector IDs or exact distance
-    # Return JSON-serializable structure already (vector_preview is a list)
-    return {"candidates": [{"id": cand[0], "score": cand[1], "vector_preview": cand[2]} for cand in topk]}
+    # Gom kết quả
+    results = client.gather(futures)
+    merged = []
+    for r in results: merged.extend(r)
+    merged.sort(key=lambda x: x[1], reverse=True)
+    
+    # Giải mã ID -> Word
+    decoded = []
+    for cand in merged[:req.k]:
+        shard_idx, row_idx = cand[0]
+        global_idx = shard_idx * SHARD_SIZE + row_idx # SHARD_SIZE phải khớp index_builder
+        
+        w_text = f"ID_{global_idx}"
+        if GLOBAL_META_DF is not None and 0 <= global_idx < len(GLOBAL_META_DF):
+            w_text = GLOBAL_META_DF.iloc[global_idx]["word"]
+        
+        decoded.append({"word": w_text, "score": cand[1]})
+
+    return {"query": req.text, "results": decoded}

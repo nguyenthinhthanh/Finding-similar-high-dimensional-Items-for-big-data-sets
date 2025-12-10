@@ -143,6 +143,7 @@ def shard_qed_filter_local(query: np.ndarray, worker_rank: int, n_workers: int, 
 
     Uses prebuilt WORKER_LSH_INDEX if available; otherwise falls back to scanning shards.
     """
+    candidates = []
     # If local LSH index is built, use it
     if WORKER_LSH_INDEX is not None:
         # Query LSH index (it expects signature shape (num_perm,) uint-like)
