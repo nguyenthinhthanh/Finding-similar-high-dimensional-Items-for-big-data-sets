@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import os
-import pickle
-import sys
+from tqdm import tqdm
 
 # CONFIG
 DATA_DIR = "data"
@@ -45,9 +44,9 @@ class VectorStore:
     def __init__(self, vec_path):
         if not os.path.exists(vec_path):
             raise FileNotFoundError(f"Vector file not found: {vec_path}")
-        print(f"[APP CLIENT] Loading vectors from {vec_path} (mmap_mode='r') ...")
+        # print(f"[APP CLIENT] Loading vectors from {vec_path} (mmap_mode='r') ...")
         self.data = np.load(vec_path, mmap_mode='r')
-        print(f"[APP CLIENT] Vector shape: {self.data.shape}, dtype={self.data.dtype}")
+        # print(f"[APP CLIENT] Vector shape: {self.data.shape}, dtype={self.data.dtype}")
 
     def get_vector(self, idx):
         if idx is None:

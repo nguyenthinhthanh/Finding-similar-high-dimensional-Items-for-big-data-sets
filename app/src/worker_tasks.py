@@ -2,7 +2,6 @@
 import numpy as np
 import sys, os
 from typing import List, Tuple
-from distributed import get_worker
 """
 Worker-side Tasks for Dask-based Query Service
 ----------------------------------------------
@@ -19,13 +18,12 @@ Notes:
 
 # Add current directory to Python import path (so local imports work)
 sys.path.append(os.path.dirname(__file__))
-from qed import query_dependent_bins, quantify_score
-from minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
+from lsh import build_lsh_index
 
 SHARD_DIR = os.environ.get('SHARD_DIR', '/data/shards')
 
 # Module-level worker state (one worker process -> one module instance)
-WORKER_LSH_INDEX = None        # MinHashLSHIndex built on concatenated local shards
+WORKER_LSH_INDEX = None        # LSHIndex built on concatenated local shards
 WORKER_LOCAL_DATA = None       # np.ndarray local_data (stacked shard arrays)
 WORKER_INDEX_MAP = None        # list of tuples (shard_idx, start_offset, length)
 WORKER_ASSIGNED_SHARDS = None  # list of (shard_idx, path) assigned to this worker
@@ -40,7 +38,7 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
       list of (global_index, path) for shards assigned to this worker.
     """
     if not os.path.exists(SHARD_DIR):
-        print(f"[ERROR] Shard directory not found: {SHARD_DIR}", flush=True)
+        print(f"[Error] Shard directory not found: {SHARD_DIR}", flush=True)
         raise FileNotFoundError(f"Shard directory not found: {SHARD_DIR}")
     
     # Stable global list of shards
@@ -56,9 +54,9 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
     ]
 
     # Debug print so you can see partitioning on worker logs
-    print(f"[Worker] Worker index={worker_rank}/{n_workers}, Total shards={S}, Assigned={len(assigned)}", flush=True)
-    for i, path in assigned:
-        print(f"    -> Assigned shard index={i}, path={path}", flush=True)
+    # print(f"[Debug] Worker index={worker_rank}/{n_workers}, Total shards={S}, Assigned={len(assigned)}", flush=True)
+    # for i, path in assigned:
+    #     print(f"    -> Assigned shard index={i}, path={path}", flush=True)
 
     return assigned
 
@@ -67,12 +65,12 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
 # ---------------------------------------------------------------------
 def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 8, max_bucket_size: int = 5000):
     """
-    Build the local MinHash LSH index for this worker based on assigned shards.
+    Build the local LSH index for this worker based on assigned shards.
     This function is intended to be executed on the worker process at startup via client.run(..., workers=[addr]).
     It:
       - lists assigned shards
       - loads them and stacks into local_data
-      - builds MinHashLSHIndex on local_data
+      - builds LSHIndex on local_data
       - stores index and mapping in module-level variables for subsequent queries
     Returns True on success.
     """
@@ -109,11 +107,11 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 8, max_b
     WORKER_INDEX_MAP = index_map
 
     # build LSH index on local_data
-    print(f"[Worker] Building LSH on local_data shape={local_data.shape} (bands={bands}) ...", flush=True)
-    lsh_index = build_minhash_lsh_index(local_data, bands=bands, max_bucket_size=max_bucket_size, verbose=False)
+    print(f"[Info] Building LSH on local_data shape={local_data.shape} (bands={bands}) ...", flush=True)
+    lsh_index = build_lsh_index(local_data, bands=bands, max_bucket_size=max_bucket_size, verbose=False)
     WORKER_LSH_INDEX = lsh_index
 
-    print(f"[Worker] Built LSH index successfully: local_rows={local_data.shape[0]}, shards={len(assigned)}", flush=True)
+    print(f"[Info] Built LSH index successfully: local_rows={local_data.shape[0]}, shards={len(assigned)}", flush=True)
     return True
 
 # ---------------------------------------------------------------------
@@ -125,13 +123,13 @@ def _local_idx_to_shard_row(local_idx: int):
     Uses WORKER_INDEX_MAP which contains tuples (shard_idx, start_offset, length).
     """
     if WORKER_INDEX_MAP is None or len(WORKER_INDEX_MAP) == 0:
-        raise RuntimeError("Index map not initialized on worker")
+        raise RuntimeError("[Info] Index map not initialized on worker")
     # linear scan is fine because number of assigned shards per worker is typically small
     for shard_idx, start, length in WORKER_INDEX_MAP:
         if start <= local_idx < start + length:
             return shard_idx, int(local_idx - start)
     # not found
-    raise IndexError(f"Local index {local_idx} not mapped to any shard")
+    raise IndexError(f"[Info] Local index {local_idx} not mapped to any shard")
 
 # ---------------------------------------------------------------------
 # Main query-time worker function (invoked remotely by the driver)
@@ -148,7 +146,7 @@ def shard_qed_filter_local(query: np.ndarray, worker_rank: int, n_workers: int, 
         # Query LSH index (it expects signature shape (num_perm,) uint-like)
         try:
             ids, sims = WORKER_LSH_INDEX.query(query, k=top_m)
-            print(f"[Worker Debug] Query result -> ids: {ids[:10]}, sims: {sims[:10]}", flush=True)
+            # print(f"[Debug] Query result -> ids: {ids[:10]}, sims: {sims[:10]}", flush=True)
         except Exception as e:
             print(f"[Error] LSH query failed: {e}. Falling back to scanning.", flush=True)
             ids, sims = np.array([], dtype=int), np.array([], dtype=float)

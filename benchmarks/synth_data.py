@@ -1,213 +1,194 @@
 # benchmarks/synth_data.py
 import os
-import sys
 import numpy as np
-import pandas as pd
-import argparse
+import hashlib
 import pickle
-import gc
-from tqdm import tqdm
+from typing import List, Set, Tuple
 
-# --- CONFIG ---
-# Input dimension của GloVe và Word2Vec đều là 300
-INPUT_DIM = 300   
-# Output dimension (Signature size) - Giữ 128 để khớp hệ thống cũ
-NUM_BITS = 128    
+# Large prime for modular hashing (fits in 64-bit Python int math)
+_PRIME = (1 << 61) - 1
 
-# Đường dẫn mặc định (giống prepare_data.py)
-DATA_DIR = "data"
-GLOVE_TXT = os.path.join(DATA_DIR, "glove.840B.300d.txt")
-W2V_LOCAL = os.path.join(DATA_DIR, "word2vec-google-news-300.kv")
+def _stable_shingle_hash(sh: str) -> int:
+    """Stable integer fingerprint for a shingle (use SHA1 then take 8 bytes)."""
+    h = hashlib.sha1(sh.encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big") % _PRIME
 
-# Thư viện bổ trợ
-try:
-    import gensim.downloader as api
-    from gensim.models import KeyedVectors
-except ImportError:
-    pass
+class MinHash:
+    """Simple MinHash signature generator using linear hashing family."""
 
-def is_clean_word(w: str) -> bool:
-    """Logic lọc từ gốc của bạn: Chỉ lấy chữ cái, độ dài >= 2"""
-    return w.isalpha() and len(w) >= 2
+    def __init__(self, num_perm: int = 128, seed: int = 42):
+        self.num_perm = int(num_perm)
+        rng = np.random.RandomState(seed)
+        # Coefficients a,b for linear family: h_i(x) = (a_i * x + b_i) mod PRIME
+        # ensure a_i non-zero
+        self.a = rng.randint(1, _PRIME - 1, size=self.num_perm, dtype=np.int64)
+        self.b = rng.randint(0, _PRIME - 1, size=self.num_perm, dtype=np.int64)
 
-def generate_simhash_batch(vectors, planes):
+    def signature(self, shingles: Set[str]) -> np.ndarray:
+        """Compute minhash signature for a set of shingles. Returns 1D uint64 array."""
+        if not shingles:
+            # Empty set -> use max val sentinel
+            return np.full(self.num_perm, _PRIME, dtype=np.uint64)
+
+        # Convert shingles to ints
+        sh_ints = np.array([_stable_shingle_hash(s) for s in shingles], dtype=np.int64)
+        # Compute (a[:,None] * sh_ints[None,:] + b[:,None]) % PRIME => shape (num_perm, n_sh)
+        a = self.a.astype(object)[:, None]  # Object to avoid overflow in intermediate (but Python handles big ints)
+        b = self.b.astype(object)[:, None]
+        # We do computation in Python ints via vectorization loop to be robust in modulus
+        # For moderate doc sizes this is acceptable; for extreme scale consider optimized C extension.
+        sig = np.empty(self.num_perm, dtype=np.uint64)
+        for i in range(self.num_perm):
+            vals = (int(self.a[i]) * sh_ints + int(self.b[i])) % _PRIME
+            sig[i] = int(np.min(vals))
+        return sig
+
+    def batch_signature(self, shingles_list: List[Set[str]]) -> np.ndarray:
+        """Compute signatures for many documents. Returns array (N, num_perm) dtype uint64."""
+        sigs = [self.signature(s) for s in shingles_list]
+        return np.vstack(sigs).astype(np.uint64)
+
+# --------------------------
+# Shingling helpers
+# --------------------------
+def shingle_document(doc: str, k: int = 5, by_word: bool = True) -> Set[str]:
+    """Return a set of shingles for the document.
+    - if by_word=True: k is number of words
+    - else: k is number of characters (char-grams)
     """
-    SimHash: Chiếu vector lên các mặt phẳng ngẫu nhiên.
-    Input: (N, 300)
-    Output: (N, 128) dạng 0/1 (uint64)
+    if doc is None:
+        return set()
+    if by_word:
+        toks = doc.split()
+        if len(toks) < k:
+            return {" ".join(toks)}
+        return {" ".join(toks[i:i + k]) for i in range(len(toks) - k + 1)}
+    else:
+        s = doc
+        if len(s) < k:
+            return {s}
+        return {s[i:i + k] for i in range(len(s) - k + 1)}
+
+# --------------------------
+# Synthetic doc generator
+# --------------------------
+def make_synthetic_docs(n_docs: int = 10000,
+                        vocab_size: int = 1000,
+                        avg_words: int = 50,
+                        sigma_words: float = 10.0,
+                        out_dir: str = "data",
+                        seed: int = 42) -> Tuple[List[str], List[str]]:
     """
-    # Dot product: (N, 300) x (300, 128) -> (N, 128)
-    projections = np.dot(vectors, planes)
-    # Lượng tử hóa: > 0 là 1, <= 0 là 0
-    return (projections > 0).astype(np.uint64)
+    Create synthetic documents by sampling words from a synthetic vocabulary.
 
-def main(args):
-    # 1. Kiểm tra dữ liệu đầu vào
-    if args.use_prepare:
-        if not os.path.exists(GLOVE_TXT):
-             print(f"[HASH] Error: Missing {GLOVE_TXT}. Please run 'python benchmarks/prepare_data.py' first.")
-             sys.exit(1)
-
-    # 2. Khởi tạo mặt phẳng chiếu (Projection Matrix) cho SimHash
-    # Đây là "chìa khóa" để biến Vector 300d -> Signature 128d
-    np.random.seed(42)
-    planes = np.random.randn(INPUT_DIM, NUM_BITS).astype(np.float32)
-
-    words = []
-    vectors_list = []
-    seen_words = set()
-    
-    # Mặc định lấy 1.5 triệu từ nếu không set limit
-    limit_count = args.limit if (args.limit and args.limit > 0) else 1600000
-    
-    # Dictionary nhỏ để lưu Top 50k từ (dùng cho Service tra cứu nhanh)
-    mini_vocab = {}
-
-    # ---------------------------------------------------------
-    # GIAI ĐOẠN 1: ĐỌC GLOVE (Nguồn chính)
-    # ---------------------------------------------------------
-    print(f"\n[HASH] Info: 1/2 Processing GloVe...")
-    with open(GLOVE_TXT, "r", encoding="utf8", errors="ignore") as f:
-        for line in tqdm(f, total=2196017, desc="Scanning GloVe"):
-            if len(words) >= limit_count: break
-            
-            parts = line.rstrip().split(" ")
-            word = parts[0]
-            
-            # Lọc rác
-            if not is_clean_word(word): continue
-            if word in seen_words: continue
-            
-            try:
-                # Lấy vector 300 chiều
-                vec = np.asarray(parts[1:], dtype=np.float32)
-                if vec.shape[0] == INPUT_DIM:
-                    words.append(word)
-                    vectors_list.append(vec)
-                    seen_words.add(word)
-                    
-                    # Lưu vào mini_vocab nếu còn chỗ (để Service dùng)
-                    if len(mini_vocab) < 50000:
-                        mini_vocab[word] = vec
-            except: 
-                continue
-
-    print(f"[HASH] Info: Collected {len(words)} words from GloVe.")
-
-    # ---------------------------------------------------------
-    # GIAI ĐOẠN 2: BỔ SUNG WORD2VEC (Nguồn phụ)
-    # ---------------------------------------------------------
-    # Chỉ chạy nếu chưa đủ limit và có cài gensim
-    if 'gensim' in sys.modules and len(words) < limit_count:
-        print(f"\n[HASH] Info: 2/2 Checking Word2Vec (to supplement)...")
-        
-        # Tải/load model W2V
-        has_w2v = False
-        wv = None
-        
-        if os.path.exists(W2V_LOCAL):
-            print("[HASH] Info: Loading local W2V...")
-            try:
-                wv = KeyedVectors.load(W2V_LOCAL, mmap='r')
-                has_w2v = True
-            except: pass
-        else:
-            print("[HASH] Info: Downloading W2V first time...")
-            try:
-                wv = api.load("word2vec-google-news-300")
-                wv.save(W2V_LOCAL)
-                has_w2v = True
-            except: pass
-
-        if has_w2v and wv:
-            print("[HASH] Info: Merging W2V words...")
-            for word in tqdm(wv.index_to_key, desc="Merging W2V"):
-                if len(words) >= limit_count: break
-                
-                # Logic lọc và check trùng
-                if is_clean_word(word) and word not in seen_words:
-                    vec = wv[word]
-                    if vec.shape[0] == INPUT_DIM:
-                        words.append(word)
-                        vectors_list.append(vec.astype(np.float32))
-                        seen_words.add(word)
-                        
-                        # Bổ sung vào mini_vocab nếu chưa đầy
-                        if len(mini_vocab) < 50000:
-                            mini_vocab[word] = vec.astype(np.float32)
-            
-            # Giải phóng RAM
-            del wv
-            gc.collect()
-
-    # ---------------------------------------------------------
-    # GIAI ĐOẠN 3: TÍNH SIMHASH & LƯU
-    # ---------------------------------------------------------
-    if not vectors_list:
-        print("[HASH] Error: No valid words found!")
-        sys.exit(1)
-
-    N = len(words)
-    print(f"\n[HASH] Info: 3/3 Calculating SimHash for {N} words...")
-    
-    # Gom list thành Matrix lớn (N, 300)
-    X_float = np.vstack(vectors_list)
-    
-    # Tính Signature (N, 128)
-    X_sigs = generate_simhash_batch(X_float, planes)
-    
-    # Giải phóng vector float để tiết kiệm RAM (chỉ giữ lại sigs uint64)
-    del X_float
-    del vectors_list
-    gc.collect()
-
-    # Lưu file vector (sigs.npy)
-    out_dir = args.out_dir
+    Returns (docs, ids) and writes docs and ids to out_dir.
+    """
+    rng = np.random.RandomState(seed)
     os.makedirs(out_dir, exist_ok=True)
-    
-    sigs_path = os.path.join(out_dir, "sigs.npy")
-    print(f"[HASH] Info: Saving {sigs_path}...")
-    np.save(sigs_path, X_sigs)
-    
-    # Lưu file Meta (meta.parquet) - chứa ID và Word
-    meta_path = args.meta_path if args.meta_path else os.path.join(out_dir, "meta.parquet")
-    df = pd.DataFrame({"id": np.arange(N).astype(str), "word": words})
-    df.to_parquet(meta_path, index=False)
-    print(f"[HASH] Info: Saving {meta_path}")
 
-    # Lưu Semantic Config (Quan trọng cho Service)
-    # Service cần 'planes' để hash câu query, và 'mini_vocab' để tra từ
-    config_path = os.path.join(out_dir, "semantic_config.pkl")
-    with open(config_path, "wb") as f:
-        pickle.dump({
-            "projections": planes, 
-            "mini_vocab": mini_vocab
-        }, f)
-    print(f"[HASH] Info: Saving {config_path} for Query Service")
+    # Build a synthetic vocabulary: word0, word1, ...
+    vocab = [f"w{idx}" for idx in range(vocab_size)]
 
-     # --- Tạo docs.pkl & ids.pkl để tương thích với benchmark cũ ---
-    # docs: dùng chính "word" làm document text (hoặc bạn có thể map sang phrase)
-    docs_path = os.path.join(out_dir, "docs.pkl")
-    ids_path = os.path.join(out_dir, "ids.pkl")
+    docs = []
+    ids = []
+    for i in range(n_docs):
+        # Number of words for this doc (clamp to >=1)
+        n_words = max(1, int(rng.normal(loc=avg_words, scale=sigma_words)))
+        words = rng.choice(vocab, size=n_words, replace=True)
+        doc_text = " ".join(words)
+        docs.append(doc_text)
+        ids.append(f"doc_{i:06d}")
 
-    docs = words  # mỗi word coi như một "document" ngắn
-    ids = [f"w{idx:07d}" for idx in range(N)]  # id dễ đọc: w0000001 ...
-
-    with open(docs_path, "wb") as f:
+    # Save original docs & ids (pickle)
+    with open(os.path.join(out_dir, "docs.pkl"), "wb") as f:
         pickle.dump(docs, f)
-    with open(ids_path, "wb") as f:
+    with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
         pickle.dump(ids, f)
 
-    print(f"[HASH] Info: Saved docs -> {docs_path} and ids -> {ids_path}")
+    print(f"Saved {n_docs} synthetic docs to {out_dir}/docs.pkl and ids to ids.pkl")
+    return docs, ids
 
-    print("\n=== COMPLETE THE SEMANTIC DATA CREATION PROCESS ===")
+# --------------------------
+# Build MinHash signatures for a set of documents and save
+# --------------------------
+def build_and_save_minhash_signatures(docs: List[str],
+                                     ids: List[str],
+                                     num_perm: int = 128,
+                                     k_shingle: int = 3,
+                                     by_word: bool = True,
+                                     out_dir: str = "data",
+                                     save_shingles: bool = True,
+                                     seed: int = 42) -> np.ndarray:
+    """
+    Build MinHash signatures for docs and save to out_dir as sigs.npy (uint64).
+    Also saves shingles list if save_shingles True.
+    Returns signatures array shape (N, num_perm).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    # Shingle docs
+    shingles_list = [shingle_document(d, k=k_shingle, by_word=by_word) for d in docs]
 
+    # Build minhash
+    mh = MinHash(num_perm=num_perm, seed=seed)
+    # Shape (N, num_perm), dtype uint64
+    sigs = mh.batch_signature(shingles_list) 
+
+    # Save signatures and ancillary info
+    np.save(os.path.join(out_dir, "sigs.npy"), sigs)
+    with open(os.path.join(out_dir, "ids.pkl"), "wb") as f:
+        pickle.dump(ids, f)
+    # Store MH object params for query time (we only store seed/num_perm/k_shingle/by_word)
+    with open(os.path.join(out_dir, "minhash_meta.pkl"), "wb") as f:
+        pickle.dump({"num_perm": num_perm, "k_shingle": k_shingle, "by_word": by_word, "seed": seed}, f)
+
+    if save_shingles:
+        with open(os.path.join(out_dir, "shingles.pkl"), "wb") as f:
+            pickle.dump(shingles_list, f)
+
+    print(f"Saved signatures to {out_dir}/sigs.npy (shape={sigs.shape}), metadata/minhash_meta.pkl")
+    return sigs
+
+# --------------------------
+# Inspect / quick stats
+# --------------------------
+def inspect_signatures(sigs: np.ndarray, docs: List[str], ids: List[str], n_sample: int = 5):
+    print("Signatures stats:")
+    print(f" - shape: {sigs.shape}")
+    print(f" - dtype: {sigs.dtype}")
+    print(f" - sample rows (first {n_sample}):")
+    print(sigs[:n_sample])
+    print("\nSample documents:")
+    for i in range(min(n_sample, len(docs))):
+        print(f" - id={ids[i]} len(doc)={len(docs[i])} -> {docs[i][:120]}...")
+
+# --------------------------
+# CLI / script entrypoint
+# --------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--use-prepare", action="store_true", default=True, help="Use data from prepare_data")
-    parser.add_argument("--limit", type=int, default=1500000, help="Limit number of words (Default 1.5 million)")
-    parser.add_argument("--meta-path", default="data/meta.parquet")
-    parser.add_argument("--out-dir", default="data")
-    
-    args = parser.parse_args()
-    main(args)
+    # Parameters: tweak to your needs
+    N_DOCS = 20000
+    VOCAB = 20
+    AVG_WORDS = 40
+    SIGMA_WORDS = 10.0
+    OUT_DIR = "data"
+    NUM_PERM = 128
+    K_SHINGLE = 1
+    BY_WORD = True
+    SEED = 42
+
+    docs, ids = make_synthetic_docs(n_docs=N_DOCS,
+                                    vocab_size=VOCAB,
+                                    avg_words=AVG_WORDS,
+                                    sigma_words=SIGMA_WORDS,
+                                    out_dir=OUT_DIR,
+                                    seed=SEED)
+
+    sigs = build_and_save_minhash_signatures(docs, ids,
+                                            num_perm=NUM_PERM,
+                                            k_shingle=K_SHINGLE,
+                                            by_word=BY_WORD,
+                                            out_dir=OUT_DIR,
+                                            save_shingles=True,
+                                            seed=SEED)
+
+    inspect_signatures(sigs, docs, ids, n_sample=5)

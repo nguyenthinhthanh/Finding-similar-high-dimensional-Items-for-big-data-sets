@@ -27,7 +27,7 @@ def ensure_out_dir(out_dir: str):
 def _validate_and_get_params(arr_shape: Tuple[int,int], pack_bits: bool):
     N, D = arr_shape
     if D != 128:
-        print(f"[WARN] Signature dimension is {D}; code assumes 128 for SimHash but will proceed.")
+        print(f"[Warning] Signature dimension is {D}; code assumes 128 for SimHash but will proceed.")
     bytes_per_row = (D + 7) // 8 if pack_bits else None
     return N, D, bytes_per_row
 
@@ -58,7 +58,7 @@ def split_and_save(data_path: str, out_dir: str, shard_size: int = 5000, pack_bi
     ensure_out_dir(out_dir)
 
     # Use memory-mapped load to avoid reading whole file into RAM
-    print(f"[INDEX_BUILDER] Loading data (mmap) from {data_path} ...")
+    print(f"[Info] Loading data (mmap) from {data_path} ...")
     arr = np.load(data_path, mmap_mode='r')
     N, D, bytes_per_row = _validate_and_get_params(arr.shape, pack_bits)
 
@@ -72,10 +72,10 @@ def split_and_save(data_path: str, out_dir: str, shard_size: int = 5000, pack_bi
             _save_shard_packed(shard, out_fname)
         else:
             _save_shard_raw(shard, out_fname)
-        print(f"[INDEX_BUILDER] Wrote shard {i:05d}: rows {start}:{end} -> {out_fname}")
+        print(f"[Info] Wrote shard {i:05d}: rows {start}:{end} -> {out_fname}")
         i += 1
 
-    print(f"[INDEX_BUILDER] Completed: wrote {i} shards to {out_dir}")
+    print(f"[Info] Completed: wrote {i} shards to {out_dir}")
 
 def print_hist_info_shard(shard: np.ndarray, name: str, packed: bool):
     """
@@ -93,7 +93,7 @@ def print_hist_info_shard(shard: np.ndarray, name: str, packed: bool):
             print(f"First {rows_to_preview} unpacked rows:\n{unpacked}")
             print(f"Min={unpacked.min()}, Max={unpacked.max()}")
         except Exception as e:
-            print(f"[WARN] Failed to unpack preview: {e}")
+            print(f"[Warning] Failed to unpack preview: {e}")
     else:
         # raw 0/1 data
         rows_to_preview = min(3, shard.shape[0])
@@ -108,7 +108,7 @@ def print_hist_info_shard(shard: np.ndarray, name: str, packed: bool):
 def print_all_shards_info(shard_dir: str, packed: bool):
     shard_files = sorted([f for f in os.listdir(shard_dir) if f.endswith(".npy")])
     if not shard_files:
-        print(f"No shard files found in {shard_dir}")
+        print(f"[Error] No shard files found in {shard_dir}")
         return
     for fname in shard_files:
         path = os.path.join(shard_dir, fname)

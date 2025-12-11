@@ -86,4 +86,4 @@ if __name__ == "__main__":
     # 2. Chuẩn bị Word2Vec (Tùy chọn, để bổ sung vốn từ)
     download_word2vec()
     
-    print("\nFinished preparing data!")
+    print("\n=== FINISHED PREPARING DATA! ===")

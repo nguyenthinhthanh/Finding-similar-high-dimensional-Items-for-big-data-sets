@@ -1,7 +1,5 @@
 # src/worker_entrypoint.py
 import os
-import sys
-from distributed.deploy.local import LocalCluster
 
 # -----------------------------------------------------------
 # Dask worker entrypoint script

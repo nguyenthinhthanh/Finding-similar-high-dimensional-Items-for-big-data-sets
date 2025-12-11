@@ -93,7 +93,7 @@ def startup_event():
     workers = wait_for_workers(client, timeout=30, poll_interval=0.5, expected_count=3)
 
     if not workers:
-        print("[Startup] WARNING: No workers detected; continuing but queries may fail.", flush=True)
+        print("[Startup] Warning: No workers detected; continuing but queries may fail.", flush=True)
     else:
         print("[Startup] Workers detected:", list(workers.keys()), flush=True)
 
@@ -132,7 +132,6 @@ def startup_event():
     #             })(),
     # q), flush=True)
 
-
 # -----------------------------------------------------------
 # POST /query endpoint
 # -----------------------------------------------------------
@@ -151,7 +150,7 @@ def query(req: QueryRequest):
         5. Merge, sort, and truncate to top-k results.
     """
     # --- DEBUG: Print received JSON request ---
-    print(f"[DEBUG] Received query: {req.json()}", flush=True)
+    print(f"[Debug] Received query: {req.json()}", flush=True)
 
     # Convert request vector to NumPy array
     # If client sends a SimHash signature as list of 0/1:
@@ -160,8 +159,8 @@ def query(req: QueryRequest):
     if q.ndim != 1 or q.shape[0] != 128:
         return {"error": "Query signature must be 1D array of length 128 (0/1)"} 
     # --- DEBUG: Print first 10 elements and dtype ---
-    print(f"[DEBUG] Query vector dtype: {q.dtype}", flush=True)
-    print(f"[DEBUG] Query vector preview (first 10): {q[:10]}", flush=True)
+    print(f"[Debug] Query vector dtype: {q.dtype}", flush=True)
+    print(f"[Debug] Query vector preview (first 10): {q[:10]}", flush=True)
 
     # edges = GLOBAL_EDGES
     # if edges is None:
@@ -170,7 +169,7 @@ def query(req: QueryRequest):
     # Submit query tasks to all active Dask workers
     workers = list(client.scheduler_info()['workers'].keys())
     # DEBUG: Output the workers for inspection
-    print(f"[DEBUG] Active Dask workers: {workers}", flush=True)
+    print(f"[Debug] Active Dask workers: {workers}", flush=True)
 
     futures = []
     for wi, w in enumerate(workers):
