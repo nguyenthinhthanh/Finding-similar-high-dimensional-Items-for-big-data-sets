@@ -7,19 +7,12 @@ import pickle
 import pandas as pd
 from collections import defaultdict
 from sklearn.metrics.pairwise import euclidean_distances
-from app.src.minhash_lsh import build_minhash_lsh_index, minhash_lsh_search
-from benchmarks.synth_data import MinHash, shingle_document
 
 # ============================================================
-# benchmarks/benchmark_runner.py
-# ============================================================
-# Purpose:
-#   This script benchmarks and compares multiple similarity search
-#   algorithms (Brute-force, FAISS, LSH) on synthetic or real datasets.
-#
-#   It measures both performance (latency, throughput) and quality
-#   metrics (Recall@k, Precision@k, MRR) for top-k nearest neighbor search.
-#
+# benchmark_runner.py (Adapted for SimHash signatures)
+# - Uses Hamming distance for exact comparison of SimHash bit signatures.
+# - Provides a simple banding-based LSH index for SimHash (band_size * bands = 128).
+# - Keeps FAISS option (converts bits to float) for comparison.
 # ============================================================
 
 # ------------------------------------------------------------
@@ -36,21 +29,15 @@ with open("data/ids.pkl", "rb") as f:
 def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
     """
     Create the file curl_query.sh to check a specific vector query.
-    
-    Parameters:
-    data_path (str): path to the .npy file containing vector data
-    index (int): index of the vector to check
-    k (int): number of top-k results to retrieve
-    out_dir (str): directory to save the curl_query.sh file
+    For SimHash we write the bit-array as a list of 0/1.
     """
-    # Load data
     data = np.load(data_path)
     query_vector = data[index].tolist()
 
     os.makedirs(out_dir, exist_ok=True)
 
     payload = {
-        "vector": query_vector,
+        "signature": query_vector,
         "k": k
     }
 
@@ -60,38 +47,23 @@ def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
         f'-d "{json.dumps(payload).replace('"', '\\"')}"'
     )
 
-
     out_path = os.path.join(out_dir, "curl_query.sh")
     with open(out_path, "w") as f:
         f.write(curl_command + "\n")
 
 # ------------------------------------------------------------
 # Evaluation metrics for retrieval quality
+# (unchanged)
 # ------------------------------------------------------------
 def recall_at_k(pred, truth, k):
-    """
-    Compute Recall@k:
-      - Measures how many of the true nearest neighbors
-        are correctly retrieved in the top-k predicted list.
-    """
     recalls = [len(set(p) & set(t)) / k for p, t in zip(pred, truth)]
     return np.mean(recalls)
 
 def precision_at_k(pred, truth, k):
-    """
-    Compute Precision@k:
-      - Measures how many of the retrieved neighbors
-        are actually correct among all top-k predictions.
-    """
-    precisions = [len(set(p) & set(t)) / len(set(p)) for p, t in zip(pred, truth)]
+    precisions = [len(set(p) & set(t)) / len(set(p)) if len(set(p))>0 else 0.0 for p, t in zip(pred, truth)]
     return np.mean(precisions)
 
 def mean_reciprocal_rank(pred, truth):
-    """
-    Compute Mean Reciprocal Rank (MRR):
-      - Measures ranking quality by averaging the reciprocal
-        of the rank position of the first correct neighbor.
-    """
     ranks = []
     for p, t in zip(pred, truth):
         rank = 0
@@ -102,37 +74,151 @@ def mean_reciprocal_rank(pred, truth):
         ranks.append(rank)
     return np.mean(ranks)
 
+# ------------------------------------------------------------
+# Hamming / utility functions for SimHash (signatures are arrays of 0/1)
+# ------------------------------------------------------------
+def hamming_distances_single(query, data):
+    """
+    Compute Hamming distance from single query (1D array of 0/1) to all rows in data.
+    Returns an (N,) int array.
+    """
+    # Convert to boolean for fast XOR and sum
+    q_bool = query.astype(bool)
+    d_bool = data.astype(bool)
+    # XOR then sum along axis
+    return np.count_nonzero(np.logical_xor(d_bool, q_bool), axis=1)
+
+def brute_force_hamming_nn(queries, data, k=10):
+    """
+    Brute-force using Hamming distance for SimHash bit signatures.
+    queries: (Q, D) 0/1
+    data: (N, D) 0/1
+    returns: (Q, k) indices (int)
+    """
+    Q = queries.shape[0]
+    N = data.shape[0]
+    result = np.full((Q, k), -1, dtype=int)
+    for i in range(Q):
+        dists = hamming_distances_single(queries[i], data)
+        idx = np.argsort(dists)[:k]
+        # If N < k, pad with -1 already
+        result[i, :len(idx)] = idx
+    return result
 
 # ------------------------------------------------------------
-# Similarity search methods
+# FAISS wrapper (keeps existing behavior, convert bits->float)
 # ------------------------------------------------------------
-def brute_force_nn(queries, data, k=10):
-    """
-    Brute-force nearest neighbor search (exact baseline).
-    - Compute full distance matrix between queries and all data points.
-    - Sort each row to get top-k smallest distances.
-    """
-    dists = euclidean_distances(queries, data)
-    idx = np.argsort(dists, axis=1)[:, :k]
-    return idx
-
 def faiss_search(queries, data, k=10):
     """
-    Approximate nearest neighbor search using Facebook AI's FAISS library.
-    - Uses a flat (non-quantized) L2 index for simplicity.
+    Use FAISS with L2 on float-converted signatures.
+    Note: This is approximate for bit-signatures but useful for performance comparison.
     """
     import faiss
-    index = faiss.IndexFlatL2(data.shape[1])
-    index.add(data)
-    _, I = index.search(queries, k)
+    # convert to float32
+    data_f = data.astype(np.float32)
+    queries_f = queries.astype(np.float32)
+    index = faiss.IndexFlatL2(data_f.shape[1])
+    index.add(data_f)
+    _, I = index.search(queries_f, k)
     return I
+
+# ------------------------------------------------------------
+# Simple banding-based LSH for SimHash
+# ------------------------------------------------------------
+def build_simhash_lsh_index(data, bands=8, band_size=16):
+    """
+    Build an inverted index mapping (band_idx, band_key) -> list(indices).
+    data: (N, 128) array of 0/1
+    bands * band_size must == 128
+    """
+    assert bands * band_size == data.shape[1], "bands * band_size must equal signature length"
+    index = defaultdict(list)
+    N = data.shape[0]
+    for i in range(N):
+        row = data[i]
+        for b in range(bands):
+            start = b * band_size
+            end = start + band_size
+            band = row[start:end].astype(np.uint8)
+            # Pack bits into minimal bytes, then use bytes as key
+            key = bytes(np.packbits(band))
+            index[(b, key)].append(i)
+    # Convert defaultdict to normal dict for pickling/inspection
+    return {
+        "bands": bands,
+        "band_size": band_size,
+        "inv_index": dict(index)
+    }
+
+def simhash_lsh_search(queries, data, k=10, lsh_index=None, max_candidates=2000):
+    """
+    For each query:
+      - collect candidate ids from matching band buckets
+      - compute exact Hamming distance to candidates
+      - return top-k indices (pad with -1)
+    If candidate set is empty or too small, fallback to brute-force Hamming.
+    """
+    bands = lsh_index["bands"]
+    band_size = lsh_index["band_size"]
+    inv_index = lsh_index["inv_index"]
+    Q = queries.shape[0]
+    result = np.full((Q, k), -1, dtype=int)
+
+    for qi in range(Q):
+        q = queries[qi]
+        candidates = set()
+        for b in range(bands):
+            start = b * band_size
+            end = start + band_size
+            band = q[start:end].astype(np.uint8)
+            key = bytes(np.packbits(band))
+            bucket = inv_index.get((b, key))
+            if bucket:
+                candidates.update(bucket)
+            # small optimization: early stop if many candidates
+            if len(candidates) >= max_candidates:
+                break
+
+        if not candidates:
+            # fallback to full brute-force
+            dists = hamming_distances_single(q, data)
+            idx = np.argsort(dists)[:k]
+            result[qi, :len(idx)] = idx
+            continue
+
+        cand_arr = np.fromiter(candidates, dtype=int)
+        cand_vecs = data[cand_arr]
+        dists = np.count_nonzero(np.logical_xor(cand_vecs.astype(bool), q.astype(bool)), axis=1)
+        order = np.argsort(dists)
+        topk = cand_arr[order][:k]
+        result[qi, :len(topk)] = topk
+
+        # If not enough candidates to fill k, we can fill remaining with nearest from full set
+        if len(topk) < k:
+            # compute on full set for the remaining
+            full_dists = hamming_distances_single(q, data)
+            global_order = np.argsort(full_dists)
+            # pick items from global_order that are not already in topk
+            fill = []
+            for idx in global_order:
+                if idx in topk:
+                    continue
+                fill.append(idx)
+                if len(fill) + len(topk) >= k:
+                    break
+            if fill:
+                start_fill = len(topk)
+                result[qi, start_fill:start_fill+len(fill)] = fill
+
+    return result
 
 # ------------------------------------------------------------
 # Benchmark runner: executes all methods and compares performance
 # ------------------------------------------------------------
 def run_benchmarks(data, queries, methods, k=10):
     print(f"Running {len(methods)} methods on data {data.shape}, queries={queries.shape[0]}...")
-    truth = brute_force_nn(queries, data, k)
+    # truth: brute-force hamming (exact)
+    truth = brute_force_hamming_nn(queries, data, k)
     results = []
 
     for name, func in methods.items():
@@ -156,10 +242,10 @@ def run_benchmarks(data, queries, methods, k=10):
             "throughput_qps": round(throughput, 2),
         })
 
+        # Single-test verbosity (prints detailed neighbors)
         if MODE == SINGLE_TEST:
             for qi, row in enumerate(idx):
                 print(f"\nQuery {qi}:")
-
                 query_vec = queries[qi].ravel()
                 for rank, global_idx in enumerate(row):
                     if int(global_idx) == -1:
@@ -169,35 +255,29 @@ def run_benchmarks(data, queries, methods, k=10):
                     shard_idx = int(global_idx) // SHARD_SIZE
                     row_idx   = int(global_idx) % SHARD_SIZE
                     vector_value = data[int(global_idx)]
-                    preview = vector_value[:10]
+                    preview = vector_value[:40]  # preview bits
 
                     doc_text = docs[int(global_idx)]
                     doc_id = ids[int(global_idx)]
 
-                    # Euclidean distance (L2) between query and candidate
-                    # ensure cast to float for safe math if dtype is uint64
+                    # Hamming distance
                     try:
-                        # if signatures are integer types, convert to float for distance
-                        dist = float(np.linalg.norm(query_vec.astype(float) - vector_value.astype(float)))
+                        dist = int(np.count_nonzero(np.logical_xor(query_vec.astype(bool), vector_value.astype(bool))))
                     except Exception:
-                        # Fallback: use sklearn pairwise for safety
-                        from sklearn.metrics.pairwise import euclidean_distances
-                        dist = float(euclidean_distances(query_vec.reshape(1, -1).astype(float),
-                                                        vector_value.reshape(1, -1).astype(float))[0, 0])
+                        dist = None
 
-                    # If using MinHash signatures, also report estimated Jaccard similarity:
-                    # fraction of positions in signature that are equal (MinHash property).
+                    # estimate bit-equality fraction as similarity
                     try:
-                        jacc_est = float(np.count_nonzero(query_vec == vector_value) / query_vec.shape[0])
+                        sim_est = float(np.count_nonzero(query_vec == vector_value) / query_vec.shape[0])
                     except Exception:
-                        jacc_est = None
+                        sim_est = None
 
                     print(f"  Top-{rank+1}: global={global_idx:6d} (shard={shard_idx}, row={row_idx}): preview={preview}")
-                    print(f"        preview={preview}")
                     print(f"        doc_id={doc_id} -> {doc_text[:100]}...")
-                    print(f"        Euclidean L2 distance = {dist:.6f}", end="")
-                    if jacc_est is not None:
-                        print(f"  |  est.Jaccard(from sig) = {jacc_est:.4f}")
+                    if dist is not None:
+                        print(f"        Hamming distance = {dist}", end="")
+                    if sim_est is not None:
+                        print(f"  |  est.bit_similarity = {sim_est:.4f}")
                     else:
                         print("")
 
@@ -211,23 +291,27 @@ SHARD_SIZE = 5000
 
 # ========== Main test ==========
 if __name__ == "__main__":
-    # Load MinHash signatures (precomputed features)
+    # Load SimHash signatures (precomputed features)
+    # Expect shape: (N, 128) with values 0 or 1 (dtype uint64 or uint8)
     data = np.load("data/sigs.npy")
+    # if dtype is uint64 but each element is 0/1 it's fine; cast to uint8 for quicker ops
+    data = data.astype(np.uint8)
 
     # Pick one specific query vector for inspection
+    query_text = docs[int(1025)]
     query_vector = data[1025].copy()
-    print("Query MinHash signature shape:", query_vector.shape)
-    print("-----> Query MinHash signature (sample 10):", query_vector[:10])
+    print(f"Query SimHash signature shape: {query_vector.shape} text: {query_text[:100]}...")
+    print("-----> Query SimHash signature (sample 10):", query_vector[:10])
 
     # Save command for test
     save_curl_for_query("data/sigs.npy", index=1025, k=5)
 
-    # Build lsh banding
-    lsh_index = build_minhash_lsh_index(data=data)
+    # Build lsh banding for SimHash
+    lsh_index = build_simhash_lsh_index(data=data, bands=8, band_size=16)
 
     # Wrappers for methods to match expected function signature (queries, data, k)
     def lsh_wrapper(queries_arr, data_arr, k=10):
-        return minhash_lsh_search(queries_arr, data_arr, k=k, lsh_index=lsh_index)
+        return simhash_lsh_search(queries_arr, data_arr, k=k, lsh_index=lsh_index)
 
     if MODE==SINGLE_TEST:
         print("Single Test....")
@@ -238,12 +322,11 @@ if __name__ == "__main__":
         queries = data[:100]
 
     methods = {
-        "Brute-force": brute_force_nn,
-        "FAISS": faiss_search,
-        "LSH": lsh_wrapper
+        "Brute-force(Hamming)": brute_force_hamming_nn,
+        "FAISS(L2-on-floats)": faiss_search,
+        "LSH(SimHash-band)": lsh_wrapper
     }
 
     df = run_benchmarks(data, queries, methods, k=5)
     print("\nBenchmark results:\n", df.to_string(index=False))
-    df.to_csv("results_synthetic.csv", index=False)
- 
+    df.to_csv("results_simhash.csv", index=False)
