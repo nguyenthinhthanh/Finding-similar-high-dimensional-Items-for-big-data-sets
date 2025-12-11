@@ -37,7 +37,7 @@ def save_curl_for_query(data_path, index, k=5, out_dir="benchmarks"):
     os.makedirs(out_dir, exist_ok=True)
 
     payload = {
-        "signature": query_vector,
+        "vector": query_vector,
         "k": k
     }
 

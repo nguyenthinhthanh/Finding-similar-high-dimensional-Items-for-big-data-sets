@@ -108,7 +108,7 @@ def startup_event():
 
     print("[Startup] Building local LSH indices on workers...", flush=True)
     # Choose bands and max_bucket_size consistent with index build settings
-    BANDS = 32
+    BANDS = 8
     MAX_BUCKET = 5000
     import worker_tasks
     for wi, addr in enumerate(list(workers.keys())):
@@ -154,7 +154,11 @@ def query(req: QueryRequest):
     print(f"[DEBUG] Received query: {req.json()}", flush=True)
 
     # Convert request vector to NumPy array
-    q = np.asarray(req.vector, dtype=np.uint64)
+    # If client sends a SimHash signature as list of 0/1:
+    q = np.asarray(req.vector, dtype=np.uint8)
+    # optional: validate length
+    if q.ndim != 1 or q.shape[0] != 128:
+        return {"error": "Query signature must be 1D array of length 128 (0/1)"} 
     # --- DEBUG: Print first 10 elements and dtype ---
     print(f"[DEBUG] Query vector dtype: {q.dtype}", flush=True)
     print(f"[DEBUG] Query vector preview (first 10): {q[:10]}", flush=True)

@@ -65,7 +65,7 @@ def list_local_shards(worker_rank: int, n_workers: int) -> List[Tuple[int, str]]
 # ---------------------------------------------------------------------
 # Initialization: build local LSH index from assigned shard files
 # ---------------------------------------------------------------------
-def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_bucket_size: int = 5000):
+def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 8, max_bucket_size: int = 5000):
     """
     Build the local MinHash LSH index for this worker based on assigned shards.
     This function is intended to be executed on the worker process at startup via client.run(..., workers=[addr]).
@@ -104,7 +104,7 @@ def build_local_lsh_init(worker_rank: int, n_workers: int, bands: int = 32, max_
         return False
 
     # Stack into a single local array
-    local_data = np.vstack(arrays).astype(np.uint64)
+    local_data = np.vstack(arrays).astype(np.uint8)
     WORKER_LOCAL_DATA = local_data
     WORKER_INDEX_MAP = index_map
 

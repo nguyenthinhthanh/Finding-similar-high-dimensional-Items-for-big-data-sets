@@ -29,9 +29,10 @@ class MinHashLSHIndex:
     - bands: number of bands (bands * rows == num_perm)
     - max_bucket_size: cap per bucket to avoid pathological buckets
     """
-    def __init__(self, data: np.ndarray, bands: int = 32, max_bucket_size: int = 5000):
-        self.data = data
-        self.N, self.num_perm = data.shape
+    def __init__(self, data: np.ndarray, bands: int = 8, max_bucket_size: int = 5000):
+        # ensure data is 0/1 uint8 for SimHash
+        self.data = data.astype(np.uint8)
+        self.N, self.num_perm = self.data.shape
         assert self.num_perm % bands == 0, "num_perm must be divisible by bands"
         self.bands = bands
         self.rows = self.num_perm // bands
@@ -48,70 +49,51 @@ class MinHashLSHIndex:
           - Insert index into corresponding bucket (capped by max_bucket_size)
         """
         for idx in range(self.N):
-            sig = self.data[idx]
+            sig = self.data[idx]  # 0/1 uint8
             for b in range(self.bands):
                 start = b * self.rows
-                key = sig[start:start+self.rows].tobytes()
+                band = sig[start:start+self.rows]            # array of 0/1
+                key = np.packbits(band).tobytes()           # compact key
                 tbl = self.tables[b]
                 if len(tbl[key]) < self.max_bucket_size:
                     tbl[key].append(idx)
 
                 # --- DEBUG: Check vector 1025 ---
-                if idx == 1025:
-                    print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
-                    print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
-                    print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
-                    print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
-                    print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
-                    print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
-                    print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
-                    print("\n", flush=True)
+                # if idx == 1025:
+                #     print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
+                #     print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
+                #     print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
+                #     print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
+                #     print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
+                #     print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
+                #     print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
+                #     print("\n", flush=True)
 
     def query(self, q: np.ndarray, k: int = 10, max_candidates: int = 2000, fallback_sample: int = 200):
         """
         Query a single signature q (1D array): returns (ids_array, sims_array)
         sims are estimated Jaccard = fraction of equal positions between q and candidate signature.
         """
+        # ensure q is 0/1 uint8 and length matches
+        q = q.astype(np.uint8)
+        assert q.shape[0] == self.num_perm
         cand_set = set()
         for b in range(self.bands):
             start = b * self.rows
-            key = q[start:start+self.rows].tobytes()
+            band = q[start:start+self.rows].astype(np.uint8)
+            key = np.packbits(band).tobytes()
             bucket = self.tables[b].get(key)
-            # --- DEBUG: print query band info ---
-            print(f"[LSH DEBUG] Query Band={b}", flush=True)
-            print(f"[LSH DEBUG] Query Signature preview (first 10 vals): {q[:10]}", flush=True)
-            print(f"[LSH DEBUG] Type: {type(q), q.dtype}", flush=True)
-            print(f"[LSH DEBUG] Sub-signature for this band (q[{start}:{start+self.rows}]): {q[start:start+self.rows]}", flush=True)
-            print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
-            print(f"[LSH DEBUG] Position (start,end): ({start}, {start+self.rows})", flush=True)
-            print("\n", flush=True)
             if bucket:
-                # print(f"Band {b}, key={key.hex()[:8]}..., bucket size={len(bucket)}")
-                # for global_idx in bucket:
-                #     shard_idx = global_idx // 5000
-                #     row_idx = global_idx % 5000
-                #     print(f"  global_idx={global_idx}, (shard={shard_idx}, row={row_idx})")
                 cand_set.update(bucket)
             if len(cand_set) >= max_candidates:
                 break
 
         if not cand_set:
-            print("[LSH Debug] no candidates from buckets -> returning dummy (-1)", flush=True)
-            cand_list = np.array([-1], dtype=int)
-            sims = np.array([0.0], dtype=float)
-            return cand_list, sims
-        else:
-            cand_list = np.fromiter(cand_set, dtype=int)
-            print(f"[LSH Debug] cand_list size={cand_list.size}", flush=True)
+            return np.array([-1], dtype=int), np.array([0.0], dtype=float)
 
-        if cand_list.size == 0:
-            return np.array([], dtype=int), np.array([], dtype=float)
-
-        # Shape (n_cand, num_perm)
-        cand_sigs = self.data[cand_list]
-        # Vectorized equality and mean -> Estimated Jaccard
-        sims = (cand_sigs == q).mean(axis=1)
-        # Indices into cand_list (descending)
+        cand_list = np.fromiter(cand_set, dtype=int)
+        cand_sigs = self.data[cand_list]                   # (n_cand, 128)
+        sims = (cand_sigs == q).mean(axis=1)               # fraction of equal bits
         top_idxs = np.argsort(sims)[-k:][::-1]
         return cand_list[top_idxs], sims[top_idxs]
     
