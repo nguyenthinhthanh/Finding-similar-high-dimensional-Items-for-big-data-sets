@@ -1,11 +1,23 @@
 # Finding Similar High-Dimensional Items for Big Data Sets using LSH
-**Mục tiêu:** Triển khai hệ thống tìm kiếm các mục tương tự (similar items) trong dữ liệu nhiều chiều bằng kỹ thuật Locality-Sensitive Hashing (LSH).
-Dự án minh họa cách áp dụng MinHash + LSH để xử lý datasets lớn, giảm số lượng so sánh và tăng hiệu năng tìm kiếm gần đúng (Approximate Nearest Neighbor Search). Repo này cung cấp code demo, pipeline chạy bằng Docker + Docker Compose, và các notebook/benchmark dùng Dask để scale lên nhiều worker
+**Mục tiêu:** Triển khai hệ thống tìm kiếm từ gần ngữ nghĩa trên tập dữ liệu embedding lớn, sử dụng SimHash + Locality-Sensitive Hashing (LSH) và xử lý phân tán bằng Dask Cluster.
+Dự án minh họa cách xây dựng một kiến trúc tìm kiếm tương tự (Approximate Nearest Neighbor Search - ANN) cho dữ liệu nhiều chiều nhưng vẫn đảm bảo tốc độ khi dataset rất lớn.
 
 ---
 ## Giới thiệu
+Trong các bài toán xử lý ngôn ngữ tự nhiên (NLP), việc tìm kiếm các từ gần nghĩa về ngữ nghĩa (semantic similarity) dựa trên vector embedding là nhiệm vụ quan trọng, phục vụ:
 
-Khi dữ liệu ngày càng lớn (documents, users, embeddings, item-sets…), việc tìm các phần tử giống nhau theo Jaccard / cosine / overlap trở nên rất tốn chi phí.
+- Gợi ý từ đồng nghĩa / gần nghĩa  
+- Tìm kiếm mở rộng truy vấn  
+- Hệ thống gợi ý và matching từ khóa  
+- Phân tích văn bản quy mô lớn  
+
+Tuy nhiên, khi tập embedding lên đến **hàng chục triệu từ**, tìm kiếm tuyến tính trở nên quá chậm. Khi dữ liệu ngày càng lớn (documents, users, embeddings, item-sets…), việc tìm các phần tử giống nhau theo Jaccard / cosine / overlap trở nên rất tốn chi phí.
+
+Để giải quyết bài toán, dự án sử dụng:
+
+- **SimHash** để nén vector D chiều thành chữ ký nhị phân ngắn  
+- **LSH** để nhóm các từ giống nhau vào cùng bucket  
+- **Dask Distributed** để phân tán dữ liệu thành nhiều shard và mở rộng hệ thống theo số lượng worker  
 
 **LSH** giải quyết vấn đề bằng cách:
 
@@ -18,30 +30,55 @@ Do đó chỉ cần so sánh **một tập ứng viên nhỏ**, thay vì so toà
 ---
 
 ## Cấu trúc thư mục
-- `docs/` - tóm tắt thuật toán, tham khảo, slides demo.
-- `docker/` - Dockerfile(s) cho service (api, worker, indexer), mẫu `docker-compose.yml`.
-- `app/src` - mã nguồn Python:
-  - `index_builder.py` - logic xây dựng chỉ mục phân tán (sharding, partitioning).
-  - `minhash_lsh.py` - MinHash + LSH (banding) implementation for Jaccard similarity on documents.
-  - `query_service.py` - Dask-based Query Service.
-  - `worker_entrypoint.py` - Dask worker entrypoint.
-  - `worker_task.py` - Worker-side Tasks for Dask-based Query Service.
-- `benchmarks/` - scripts chạy benchmark (throughput, latency, recall).
-- `data/` - scripts tải / sinh dataset thử nghiệm.
-    - `shards/` - chứa dữ liệu phân tán sau khi sharding.
-- `README.md`.
-
+```test
+app/
+├── src/
+│   ├── query_service.py        # API query (FastAPI)
+│   ├── index_builder.py        # Tạo shard + index LSH phân tán
+│   ├── worker_task.py          # Task xử lý query trên mỗi worker
+│   ├── lsh.py                  # SimHash + LSH trên vector nhị phân
+│   └── worker_entrypoint.py    # Entrypoint Dask worker
+benchmarks/
+│   ├── prepare_data.py         # Download GloVe + Word2Vec
+│   ├── build_signatures.py     # Tạo SimHash signature matrix
+│   └── synth_data.py           # Benchmark & test pipeline
+data/
+├── glove.840B.300d.txt
+├── word2vec-google-news-300.kv
+└── sigs.npy                    # Signature matrix (N × 128)
+docker/
+├── scheduler/
+├── worker/
+└── query/
+docker-compose.yml
+README.md
+```
 ---
 
-## Tóm tắt phương pháp tiếp cận
-Phương pháp chính là sử dụng LSH (Locality-Sensitive Hashing): mỗi mục được chuyển thành một signature ngắn bằng MinHash, sau đó được hash vào các bucket sao cho các mục tương tự có xác suất cao rơi vào cùng bucket. Khi truy vấn, chỉ cần so sánh các mục trong cùng bucket thay vì toàn bộ dataset, kết hợp với index phân tán nếu dữ liệu lớn để chia tải và tận dụng memory/CPU của nhiều node.
+## Pipeline xử lý
+#### **1. Embedding -> SimHash**
+- Mỗi vector **D chiều** được ánh xạ thành **chữ ký nhị phân d-bit**.
+- Các từ có ý nghĩa gần nhau ⇒ **chữ ký (signature) gần giống nhau**.
 
----
+#### **2. LSH Buckets**
+- Chia signature thành nhiều **bands** để đưa vào bucket.
+- Các từ có signature tương tự sẽ rơi vào **cùng bucket**, giúp:
+  - Giảm số lượng so sánh
+  - Tăng tốc truy vấn trên dataset lớn
+
+#### **3. Sharding phân tán**
+- Dataset được chia thành nhiều **shard** kích thước cố định (ví dụ: *5000 từ / shard*).
+- Mỗi worker giữ một phần dataset ⇒ **truy vấn song song** trên toàn cụm.
+
+#### **4. Distributed Query (Dask)**
+- Query được broadcast tới **toàn bộ worker**.
+- Mỗi worker tìm **ứng viên gần nhất** trong shard cục bộ.
+- Scheduler hợp nhất kết quả ⇒ trả về **top-k từ gần nghĩa**.
 
 ## Yêu cầu
 - Docker & Docker Compose.
-- Python 3.9+.  
-
+- Python 3.9+.
+  
 ---
 
 ## Hướng dẫn chạy Dask Cluster với Docker Compose
@@ -50,15 +87,29 @@ Phương pháp chính là sử dụng LSH (Locality-Sensitive Hashing): mỗi m�
 git https://github.com/nguyenthinhthanh/Finding-similar-high-dimensional-Items-for-big-data-sets
 ```
 
-#### 2. Build images
+#### 2. Chuẩn bị dữ liệu
 ```bash
-# build
+python benchmarks/prepare_data.py
+python benchmarks/build_signatures.py
+```
+#### 3. Tạo dữ liệu phân tán
+```bash
+python app/src/index_builder.py \
+    --data data/sigs.npy \
+    --out data/shards \
+    --shard-size 5000 \
+    --inspect
+```
+#### 4. Build Docker images
+```bash
 docker compose build
-
-# Khởi động cluster
+```
+#### 5. Khởi động cluster
+```bash
 docker compose up -d --scale worker=3
 ```
-##### Tổng quan các service
+
+##### ***Tổng quan các service***
 
 | Service   | Số container | Mô tả                |
 |------------|---------------|----------------------|
@@ -66,23 +117,19 @@ docker compose up -d --scale worker=3
 | worker     | 3             | Tính toán song song  |
 | query      | 1             | API HTTP gọi tới Dask cluster |
 
-### 3. Kiểm tra log
+#### 6. Gửi truy vấn
+API:
 ```bash
-docker compose logs --tail=200 scheduler
-docker compose logs --tail=200 worker
-docker compose logs --tail=200 query
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"vector":[...], "k":10}'
 ```
-### 4. Kiểm tra Dask Dashboard
+
+Python client:
 ```bash
-Mặc định, Dask Dashboard sẽ được expose tại: http://localhost:8787
+python app_client.py
 ```
-### 5. Gửi truy vấn
-```bash
-Lệnh (client → server):
-	curl -X POST http://localhost:8000/query \
-	  -H "Content-Type: application/json" \
-	  -d '{"vector":[...], "k":10}'
-```
+
 ## Đóng góp
 Bạn có ý tưởng cải thiện dự án? Hãy mở Pull Request hoặc Issue trên GitHub!
 
