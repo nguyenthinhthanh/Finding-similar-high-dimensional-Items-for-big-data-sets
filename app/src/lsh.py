@@ -1,11 +1,11 @@
-# app/src/minhash_lsh.py
+# app/src/lsh.py
 import numpy as np
 import time
 import sys, os
 import pandas as pd
 from collections import defaultdict
 """
-MinHash + LSH (banding) implementation for Jaccard similarity on documents.
+LSH (banding) implementation for Jaccard similarity on documents.
 
 Usage summary:
 - Build MinHash signatures (num_perm)
@@ -17,14 +17,14 @@ Notes:
 - For production/speed, consider using `datasketch` library (optimized C code)
 """
 
-# Build MinHash LSH index once (tune bands)
+# Build LSH index once (tune bands)
 # Try 32, 16, 8 depending on recall/precision tradeoff
 BANDS = 32
 
-# ========== MinHash-aware search helpers ==========
-class MinHashLSHIndex:
+# ========== LSH-aware search helpers ==========
+class LSHIndex:
     """
-    Build-once MinHash LSH index using banding.
+    Build-once LSH index using banding.
     - data: np.ndarray shape (N, num_perm), dtype integer-like (uint64 or int)
     - bands: number of bands (bands * rows == num_perm)
     - max_bucket_size: cap per bucket to avoid pathological buckets
@@ -53,20 +53,20 @@ class MinHashLSHIndex:
             for b in range(self.bands):
                 start = b * self.rows
                 band = sig[start:start+self.rows]            # array of 0/1
-                key = np.packbits(band).tobytes()           # compact key
+                key = np.packbits(band).tobytes()            # compact key
                 tbl = self.tables[b]
                 if len(tbl[key]) < self.max_bucket_size:
                     tbl[key].append(idx)
 
                 # --- DEBUG: Check vector 1025 ---
                 # if idx == 1025:
-                #     print(f"[LSH DEBUG] Vector index={idx}, Band={b}", flush=True)
-                #     print(f"[LSH DEBUG] Signature preview (first 10 vals): {sig[:10]}", flush=True)
-                #     print(f"[LSH DEBUG] Type: {type(sig), sig.dtype}", flush=True)
-                #     print(f"[LSH DEBUG] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
-                #     print(f"[LSH DEBUG] Key (hex): {key.hex()[:40]}...", flush=True)
-                #     print(f"[LSH DEBUG] Position (start,end): {start, start+self.rows}", flush=True)
-                #     print(f"[LSH DEBUG] Current bucket size for this key: {len(tbl[key])}", flush=True)
+                #     print(f"[Debug] Vector index={idx}, Band={b}", flush=True)
+                #     print(f"[Debug] Signature preview (first 10 vals): {sig[:10]}", flush=True)
+                #     print(f"[Debug] Type: {type(sig), sig.dtype}", flush=True)
+                #     print(f"[Debug] Sub-signature for this band (sig[{start}:{start+self.rows}]): {sig[start:start+self.rows]}", flush=True)
+                #     print(f"[Debug] Key (hex): {key.hex()[:40]}...", flush=True)
+                #     print(f"[Debug] Position (start,end): {start, start+self.rows}", flush=True)
+                #     print(f"[Debug] Current bucket size for this key: {len(tbl[key])}", flush=True)
                 #     print("\n", flush=True)
 
     def query(self, q: np.ndarray, k: int = 10, max_candidates: int = 2000, fallback_sample: int = 200):
@@ -97,13 +97,13 @@ class MinHashLSHIndex:
         top_idxs = np.argsort(sims)[-k:][::-1]
         return cand_list[top_idxs], sims[top_idxs]
     
-def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
+def lsh_search(queries, data, k=10, lsh_index: LSHIndex = None):
     """
-    Prebuilt MinHashLSHIndex for each query.
+    Prebuilt LSHIndex for each query.
     lsh_index must be built once and passed in (not None).
     """
     if lsh_index is None:
-        raise ValueError("lsh_index must be provided to minhash_lsh_search_wrapper")
+        raise ValueError("lsh_index must be provided to lsh_search")
     all_results = []
     for q in queries:
         ids, sims = lsh_index.query(q, k=k)
@@ -115,19 +115,19 @@ def minhash_lsh_search(queries, data, k=10, lsh_index: MinHashLSHIndex = None):
         all_results.append(ids[:k])
     return np.vstack(all_results)
 
-def build_minhash_lsh_index(data, bands=BANDS, max_bucket_size=5000, verbose=True):
+def build_lsh_index(data, bands=BANDS, max_bucket_size=5000, verbose=True):
     """
-    Build a MinHash LSH index from given data signatures.
+    Build a LSH index from given data signatures.
     Returns
-        lsh_index : MinHashLSHIndex
+        lsh_index : LSHIndex
         A built LSH index ready for querying.
     """
     if verbose:
-        print(f"Building MinHash-LSH index with bands={bands}, max_bucket_size={max_bucket_size}...", flush=True)
+        print(f"[Info] Building LSH index with bands={bands}, max_bucket_size={max_bucket_size}...", flush=True)
     
     # Create and build the index
-    lsh_index = MinHashLSHIndex(data, bands=bands, max_bucket_size=max_bucket_size)
+    lsh_index = LSHIndex(data, bands=bands, max_bucket_size=max_bucket_size)
     
     if verbose:
-        print(f"Built MinHashLSHIndex successfully: bands={bands}, rows={lsh_index.rows} \n", flush=True)
+        print(f"[Info] Built LSHIndex successfully: bands={bands}, rows={lsh_index.rows} \n", flush=True)
     return lsh_index
