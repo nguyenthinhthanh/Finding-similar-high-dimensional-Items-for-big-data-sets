@@ -6,6 +6,7 @@ import pickle
 from typing import List, Set, Tuple
 import argparse
 import pandas as pd
+from tqdm import tqdm
 
 # Prime for modular hashing
 _PRIME = (1 << 61) - 1
@@ -33,7 +34,10 @@ class MinHash:
         return sig
 
     def batch_signature(self, shingles_list: List[Set[str]]) -> np.ndarray:
-        sigs = [self.signature(s) for s in shingles_list]
+        sigs = []
+        # Dùng tqdm để hiển thị tiến trình
+        for s in tqdm(shingles_list, desc="Building MinHash signatures"):
+            sigs.append(self.signature(s))
         return np.vstack(sigs).astype(np.uint64)
 
 # Shingling helpers
